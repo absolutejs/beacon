@@ -320,9 +320,7 @@ const observeLongTasks = (
     });
     observer.observe({ buffered: true, type: "longtask" });
     const flush = (): void => {
-      if (reported || count === 0 || document.visibilityState !== "hidden") {
-        return;
-      }
+      if (reported || count === 0) return;
       reported = true;
       const value = Math.round(totalBlockingMs);
       report({
@@ -338,7 +336,11 @@ const observeLongTasks = (
         value,
       });
     };
-    addEventListener("visibilitychange", flush);
+    // pagehide is terminal — flush unconditionally; visibilitychange only when
+    // the page is actually hidden (matches the web-vitals reporting pattern).
+    addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flush();
+    });
     addEventListener("pagehide", flush);
   } catch {
     // longtask entry type unsupported — skip
