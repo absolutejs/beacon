@@ -145,7 +145,8 @@ export type BeaconOptions = {
 
 /** A finalized Core Web Vital measurement, tagged with the path it was seen on. */
 export type WebVital = {
-  name: "LCP" | "INP" | "CLS" | "FCP" | "TTFB";
+  /** The 5 Core Web Vitals, plus TBT (Total Blocking Time — long-task overage). */
+  name: "LCP" | "INP" | "CLS" | "FCP" | "TTFB" | "TBT";
   /** Metric value (ms for LCP/INP/FCP/TTFB; unitless for CLS). */
   value: number;
   rating: "good" | "needs-improvement" | "poor";
@@ -295,7 +296,54 @@ const deadClickCandidate = (target: Element): Element | null => {
   return control;
 };
 
-const VITAL_NAMES = new Set(["LCP", "INP", "CLS", "FCP", "TTFB"]);
+const VITAL_NAMES = new Set(["LCP", "INP", "CLS", "FCP", "TTFB", "TBT"]);
+const LONG_TASK_MS = 50;
+const TBT_GOOD_MS = 200;
+const TBT_POOR_MS = 600;
+
+// Observe long tasks (>50ms) and report Total Blocking Time (sum of per-task
+// overage) once on page-hide — the jank / INP precursor the CWV libs don't give.
+const observeLongTasks = (
+  report: (metric: WebVitalMetric) => void,
+  navigationType: string,
+): void => {
+  if (typeof PerformanceObserver === "undefined") return;
+  let totalBlockingMs = 0;
+  let count = 0;
+  let reported = false;
+  try {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        totalBlockingMs += Math.max(0, entry.duration - LONG_TASK_MS);
+        count += 1;
+      }
+    });
+    observer.observe({ buffered: true, type: "longtask" });
+    const flush = (): void => {
+      if (reported || count === 0 || document.visibilityState !== "hidden") {
+        return;
+      }
+      reported = true;
+      const value = Math.round(totalBlockingMs);
+      report({
+        id: `tbt-${navigationType}-${value}`,
+        name: "TBT",
+        navigationType,
+        rating:
+          value <= TBT_GOOD_MS
+            ? "good"
+            : value >= TBT_POOR_MS
+              ? "poor"
+              : "needs-improvement",
+        value,
+      });
+    };
+    addEventListener("visibilitychange", flush);
+    addEventListener("pagehide", flush);
+  } catch {
+    // longtask entry type unsupported — skip
+  }
+};
 const isVitalName = (name: string): name is WebVital["name"] =>
   VITAL_NAMES.has(name);
 
@@ -448,6 +496,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           );
         });
     }
+    const navigationEntry = performance.getEntriesByType("navigation")[0];
+    const navigationType =
+      navigationEntry instanceof PerformanceNavigationTiming
+        ? navigationEntry.type
+        : "navigate";
+    observeLongTasks(reportVital, navigationType);
   }
 
   const buffer: BeaconEvent[] = [];
