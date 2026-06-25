@@ -137,8 +137,55 @@ export type BeaconOptions = {
   /** Auto-capture UX/health signals as warning issues (off by default). `true`
    *  enables all with defaults; pass an object to tune. See {@link BeaconSignals}. */
   signals?: boolean | BeaconSignals;
+  /** Capture Core Web Vitals (off by default). See {@link BeaconVitalsOptions}. */
+  vitals?: boolean | BeaconVitalsOptions;
   /** Override the wire transport (default: sendBeacon / fetch keepalive). */
   transport?: BeaconTransport;
+};
+
+/** A finalized Core Web Vital measurement, tagged with the path it was seen on. */
+export type WebVital = {
+  name: "LCP" | "INP" | "CLS" | "FCP" | "TTFB";
+  /** Metric value (ms for LCP/INP/FCP/TTFB; unitless for CLS). */
+  value: number;
+  rating: "good" | "needs-improvement" | "poor";
+  /** URL path the vital was measured on (for per-route p75). */
+  path: string;
+  /** Stable per-page-load metric id (dedup). */
+  id: string;
+  navigationType: string;
+};
+
+type WebVitalMetric = {
+  name: string;
+  value: number;
+  rating: string;
+  id: string;
+  navigationType: string;
+};
+type WebVitalReporter = (callback: (metric: WebVitalMetric) => void) => void;
+/** The subset of the `web-vitals` package surface beacon uses. */
+export type WebVitalsModule = {
+  onLCP: WebVitalReporter;
+  onINP: WebVitalReporter;
+  onCLS: WebVitalReporter;
+  onFCP: WebVitalReporter;
+  onTTFB: WebVitalReporter;
+};
+
+/**
+ * Core Web Vitals capture. Uses the `web-vitals` package as an OPTIONAL,
+ * lazy-loaded peer (like rrweb for @absolutejs/replay) — install it
+ * (`bun add web-vitals`) to enable, or inject `webVitals` for tests. Each
+ * metric is reported once, finalized, and `sendBeacon`'d so it survives unload.
+ */
+export type BeaconVitalsOptions = {
+  /** Where to POST each vital. Default `/ingest/vitals`. */
+  endpoint?: string;
+  /** Inject the web-vitals fns (default: lazy `import("web-vitals")`). */
+  webVitals?: WebVitalsModule;
+  /** Also called for each finalized vital (in addition to the POST). */
+  onVital?: (vital: WebVital) => void;
 };
 
 export type Beacon = {
@@ -248,6 +295,30 @@ const deadClickCandidate = (target: Element): Element | null => {
   return control;
 };
 
+const VITAL_NAMES = new Set(["LCP", "INP", "CLS", "FCP", "TTFB"]);
+const isVitalName = (name: string): name is WebVital["name"] =>
+  VITAL_NAMES.has(name);
+
+const loadWebVitals = async (): Promise<WebVitalsModule> => {
+  const mod = (await import("web-vitals")) as unknown as WebVitalsModule;
+
+  return mod;
+};
+
+// Register the 5 Core Web Vitals; each fires once when finalized (at
+// visibilitychange / pagehide). `report` should be sendBeacon-backed so the
+// value survives the page going away.
+const observeWebVitals = (
+  webVitals: WebVitalsModule,
+  report: (metric: WebVitalMetric) => void,
+): void => {
+  webVitals.onLCP(report);
+  webVitals.onINP(report);
+  webVitals.onCLS(report);
+  webVitals.onFCP(report);
+  webVitals.onTTFB(report);
+};
+
 const noopBeacon: Beacon = {
   addBreadcrumb: () => {},
   captureException: () => {},
@@ -322,6 +393,62 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // Last request kick-off — a click that triggers a request isn't "dead".
   let lastNetworkAt = 0;
   let inSignalConsole = false;
+
+  // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
+  const vitalsOptions: BeaconVitalsOptions | null =
+    options.vitals === undefined || options.vitals === false
+      ? null
+      : options.vitals === true
+        ? {}
+        : options.vitals;
+  if (vitalsOptions !== null) {
+    const vitalsEndpoint = vitalsOptions.endpoint ?? "/ingest/vitals";
+    const reportVital = (metric: WebVitalMetric): void => {
+      if (!isVitalName(metric.name)) return;
+      const vital: WebVital = {
+        id: metric.id,
+        name: metric.name,
+        navigationType: metric.navigationType,
+        path: location.pathname,
+        rating:
+          metric.rating === "good" ||
+          metric.rating === "needs-improvement" ||
+          metric.rating === "poor"
+            ? metric.rating
+            : "needs-improvement",
+        value: metric.value,
+      };
+      vitalsOptions.onVital?.(vital);
+      const body = JSON.stringify(vital);
+      // sendBeacon survives unload (vitals finalize at pagehide); fetch fallback.
+      if (typeof navigator.sendBeacon === "function") {
+        navigator.sendBeacon(
+          vitalsEndpoint,
+          new Blob([body], { type: "application/json" }),
+        );
+      } else if (typeof fetch === "function") {
+        void fetch(vitalsEndpoint, {
+          body,
+          headers: { "content-type": "application/json" },
+          keepalive: true,
+          method: "POST",
+        }).catch(() => {
+          // best-effort telemetry
+        });
+      }
+    };
+    if (vitalsOptions.webVitals !== undefined) {
+      observeWebVitals(vitalsOptions.webVitals, reportVital);
+    } else {
+      loadWebVitals()
+        .then((webVitals) => observeWebVitals(webVitals, reportVital))
+        .catch(() => {
+          console.warn(
+            "[beacon] web-vitals not installed; vitals disabled. `bun add web-vitals`.",
+          );
+        });
+    }
+  }
 
   const buffer: BeaconEvent[] = [];
   const breadcrumbs: Breadcrumb[] = [];
