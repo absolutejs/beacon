@@ -1,0 +1,59 @@
+{
+  "name": "@absolutejs/beacon",
+  "version": "0.0.2",
+  "description": "Tiny, zero-dependency browser SDK for the AbsoluteJS observability stack. Captures uncaught errors + unhandled rejections, breadcrumbs (console/click/fetch/history), batches, and POSTs an envelope to @absolutejs/errors/ingest via sendBeacon/keepalive. ~2-5KB gz, no Effect in the browser; end-to-end type-safe via the shared erased envelope contract.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/absolutejs/beacon.git"
+  },
+  "homepage": "https://github.com/absolutejs/beacon",
+  "bugs": {
+    "url": "https://github.com/absolutejs/beacon/issues"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "license": "BSL-1.1",
+  "author": "Alex Kahn",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && bun build src/index.ts --outdir dist --sourcemap --target=browser && tsc --project tsconfig.build.json",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"./**/*.{ts,json,md}\"",
+    "check:package": "bun run typecheck && bun run build && bun run test",
+    "release": "bun run format && bun run check:package && bun publish"
+  },
+  "keywords": [
+    "absolutejs",
+    "beacon",
+    "errors",
+    "browser",
+    "sentry",
+    "error-tracking",
+    "breadcrumbs",
+    "observability",
+    "rum"
+  ],
+  "devDependencies": {
+    "@absolutejs/errors": "^0.3.0",
+    "@happy-dom/global-registrator": "^20.10.6",
+    "@types/bun": "^1.3.14",
+    "prettier": "^3.8.3",
+    "typescript": "^5.9.0"
+  }
+}
