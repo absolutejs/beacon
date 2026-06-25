@@ -84,6 +84,33 @@ export type BeaconInstrumentation = {
   history?: boolean;
 };
 
+/**
+ * "Something went wrong" signal detection — the gap between captured errors and
+ * full session streaming. Each enabled signal becomes a warning-level issue
+ * (via `captureException`, so it carries breadcrumbs + the replayId), surfacing
+ * silent problems no thrown error or user report would: rage/dead clicks,
+ * server 5xx, slow/failed requests, and `console.error`. Reuses the existing
+ * click / fetch / console instrumentation — no extra global patching.
+ */
+export type BeaconSignals = {
+  /** N rapid clicks in roughly the same spot. Default true. */
+  rageClicks?: boolean;
+  /** An interactive control clicked with no DOM/nav/scroll/focus/request response. Default true. */
+  deadClicks?: boolean;
+  /** Responses with status >= 500. Default true. */
+  serverErrors?: boolean;
+  /** Responses slower than `slowResponseMs`. Default true. */
+  slowResponses?: boolean;
+  /** Requests that threw (network / CORS). Default true. */
+  failedRequests?: boolean;
+  /** `console.error` calls (the app explicitly logged an error). Default true. */
+  consoleErrors?: boolean;
+  /** Rapid-click count that trips a rage click. Default 3. */
+  rageClickCount?: number;
+  /** Slow-response threshold (ms). Default 8000. */
+  slowResponseMs?: number;
+};
+
 export type BeaconOptions = {
   /** Project id (required) — scopes issues server-side. */
   project: string;
@@ -107,6 +134,9 @@ export type BeaconOptions = {
   getReplayId?: () => string | undefined;
   /** Auto-instrumentation toggles (all default true). */
   instrument?: BeaconInstrumentation;
+  /** Auto-capture UX/health signals as warning issues (off by default). `true`
+   *  enables all with defaults; pass an object to tune. See {@link BeaconSignals}. */
+  signals?: boolean | BeaconSignals;
   /** Override the wire transport (default: sendBeacon / fetch keepalive). */
   transport?: BeaconTransport;
 };
@@ -179,6 +209,45 @@ const describeElement = (element: Element): string => {
   return `${tag}${id}${cls}`;
 };
 
+const SHORT_URL_MAX = 80;
+const shortUrl = (url: string): string => {
+  try {
+    return new URL(url, location.origin).pathname;
+  } catch {
+    return url.slice(0, SHORT_URL_MAX);
+  }
+};
+
+// An anchor whose click does something invisible to us (new tab / download /
+// off-site nav) — so "nothing changed on this page" doesn't make it "dead".
+const isInvisibleAnchor = (anchor: HTMLAnchorElement): boolean => {
+  if (anchor.target === "_blank" || anchor.hasAttribute("download")) return true;
+  try {
+    return new URL(anchor.href, location.origin).origin !== location.origin;
+  } catch {
+    return true;
+  }
+};
+
+// A control we'd expect to DO something when clicked (else null) — used for
+// dead-click detection.
+const deadClickCandidate = (target: Element): Element | null => {
+  const control = target.closest<HTMLElement>(
+    "button, a[href], [role='button'], input[type='submit'], input[type='button'], [onclick]",
+  );
+  if (control === null) return null;
+  if (
+    control.hasAttribute("disabled") ||
+    control.getAttribute("aria-disabled") === "true"
+  ) {
+    return null;
+  }
+  if (control instanceof HTMLAnchorElement && isInvisibleAnchor(control)) {
+    return null;
+  }
+  return control;
+};
+
 const noopBeacon: Beacon = {
   addBreadcrumb: () => {},
   captureException: () => {},
@@ -234,6 +303,25 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const transport = options.transport ?? defaultTransport;
   const instrument = options.instrument ?? {};
   const sessionId = newId();
+
+  // Signal detection (off unless `signals` is set). `true` ⇒ all defaults.
+  const signals: BeaconSignals | null =
+    options.signals === undefined || options.signals === false
+      ? null
+      : options.signals === true
+        ? {}
+        : options.signals;
+  const SLOW_RESPONSE_DEFAULT_MS = 8000;
+  const RAGE_COUNT_DEFAULT = 3;
+  const RAGE_WINDOW_MS = 1000;
+  const RAGE_RADIUS_PX = 40;
+  const DEAD_CLICK_WINDOW_MS = 1500;
+  const SIGNAL_TEXT_MAX = 180;
+  const slowResponseMs = signals?.slowResponseMs ?? SLOW_RESPONSE_DEFAULT_MS;
+  const rageCount = signals?.rageClickCount ?? RAGE_COUNT_DEFAULT;
+  // Last request kick-off — a click that triggers a request isn't "dead".
+  let lastNetworkAt = 0;
+  let inSignalConsole = false;
 
   const buffer: BeaconEvent[] = [];
   const breadcrumbs: Breadcrumb[] = [];
@@ -317,6 +405,83 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     push({ level, message, name: "Message" });
   };
 
+  // A signal is a warning-level capture with a stable message (so the store
+  // groups it) and the variable detail in tags.
+  const emitSignal = (
+    message: string,
+    signalTags: Record<string, string>,
+  ): void => {
+    captureException(new Error(message), {
+      level: "warning",
+      tags: signalTags,
+    });
+  };
+
+  const reportResponseSignal = (
+    url: string,
+    status: number,
+    durationMs: number,
+  ): void => {
+    if (signals === null) return;
+    if (signals.serverErrors !== false && status >= 500) {
+      emitSignal("Server error response (5xx)", {
+        endpoint: shortUrl(url),
+        signal: "http_5xx",
+        status: String(status),
+      });
+      return;
+    }
+    if (signals.slowResponses !== false && durationMs > slowResponseMs) {
+      emitSignal("Slow response", {
+        durationMs: String(durationMs),
+        endpoint: shortUrl(url),
+        signal: "slow_response",
+      });
+    }
+  };
+
+  const reportFailureSignal = (url: string): void => {
+    if (signals === null || signals.failedRequests === false) return;
+    emitSignal("Network request failed", {
+      endpoint: shortUrl(url),
+      signal: "fetch_failed",
+    });
+  };
+
+  // A control clicked with no response (DOM mutation / nav / scroll / focus /
+  // request) within the window — a likely broken control.
+  const detectDeadClick = (target: Element): void => {
+    const control = deadClickCandidate(target);
+    if (control === null) return;
+    const urlBefore = location.href;
+    const scrollBefore = window.scrollY;
+    const activeBefore = document.activeElement;
+    const clickedAt = Date.now();
+    let mutated = false;
+    const observer = new MutationObserver(() => {
+      mutated = true;
+    });
+    observer.observe(document.body, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    window.setTimeout(() => {
+      observer.disconnect();
+      const responded =
+        mutated ||
+        location.href !== urlBefore ||
+        window.scrollY !== scrollBefore ||
+        document.activeElement !== activeBefore ||
+        lastNetworkAt > clickedAt;
+      if (responded) return;
+      emitSignal("Dead click — control didn't respond", {
+        signal: "dead_click",
+        target: describeElement(control),
+      });
+    }, DEAD_CLICK_WINDOW_MS);
+  };
+
   // --- auto-instrumentation -------------------------------------------------
 
   if (instrument.globalErrors !== false) {
@@ -358,6 +523,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           message: `console.${method}: ${args.map(String).join(" ")}`,
           type: "console",
         });
+        if (
+          method === "error" &&
+          signals !== null &&
+          signals.consoleErrors !== false &&
+          !inSignalConsole
+        ) {
+          inSignalConsole = true;
+          const text = args.map(String).join(" ").trim().slice(0, SIGNAL_TEXT_MAX);
+          if (text !== "") emitSignal(text, { signal: "console_error" });
+          inSignalConsole = false;
+        }
         original.apply(console, args);
       };
       cleanups.push(() => {
@@ -367,11 +543,34 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   }
 
   if (instrument.clicks !== false && typeof document !== "undefined") {
+    let clickTimes: number[] = [];
+    let lastX = 0;
+    let lastY = 0;
     const onClick = (event: Event): void => {
       const target = event.target;
-      if (target instanceof Element) {
-        addBreadcrumb({ message: describeElement(target), type: "click" });
+      if (!(target instanceof Element)) return;
+      addBreadcrumb({ message: describeElement(target), type: "click" });
+      if (signals === null) return;
+      if (signals.rageClicks !== false && event instanceof MouseEvent) {
+        const now = Date.now();
+        const near =
+          Math.abs(event.clientX - lastX) < RAGE_RADIUS_PX &&
+          Math.abs(event.clientY - lastY) < RAGE_RADIUS_PX;
+        lastX = event.clientX;
+        lastY = event.clientY;
+        clickTimes = near
+          ? clickTimes.filter((time) => now - time < RAGE_WINDOW_MS)
+          : [];
+        clickTimes.push(now);
+        if (clickTimes.length >= rageCount) {
+          clickTimes = [];
+          emitSignal("Rage click — repeated clicks with no response", {
+            signal: "rage_click",
+            target: describeElement(target),
+          });
+        }
       }
+      if (signals.deadClicks !== false) detectDeadClick(target);
     };
     document.addEventListener("click", onClick, true);
     cleanups.push(() => document.removeEventListener("click", onClick, true));
@@ -392,6 +591,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const method = init?.method ?? "GET";
       // Never breadcrumb our own ingest POSTs — avoids a feedback loop.
       if (url.includes(endpoint)) return originalFetch(...args);
+      const start = Date.now();
+      lastNetworkAt = start;
       try {
         const response = await originalFetch(...args);
         addBreadcrumb({
@@ -399,9 +600,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           message: `${method} ${url} → ${response.status}`,
           type: "fetch",
         });
+        reportResponseSignal(url, response.status, Date.now() - start);
         return response;
       } catch (error) {
         addBreadcrumb({ message: `${method} ${url} → failed`, type: "fetch" });
+        reportFailureSignal(url);
         throw error;
       }
     };
