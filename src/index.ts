@@ -227,13 +227,18 @@ const toError = (value: unknown): Error => {
   if (value instanceof Error) return value;
   if (typeof value === "string") return new Error(value);
   if (typeof value === "object" && value !== null) {
-    const object = value as { message?: unknown; name?: unknown };
+    const object = value as {
+      message?: unknown;
+      name?: unknown;
+      stack?: unknown;
+    };
     const message =
       typeof object.message === "string"
         ? object.message
         : safeStringify(value);
     const error = new Error(message);
     if (typeof object.name === "string") error.name = object.name;
+    if (typeof object.stack === "string") error.stack = object.stack;
     return error;
   }
   return new Error(String(value));
@@ -245,6 +250,59 @@ const safeStringify = (value: unknown): string => {
   } catch {
     return String(value);
   }
+};
+
+const errorWithStack = (
+  name: string,
+  message: string,
+  location?: string,
+): Error => {
+  const error = new Error(message);
+  error.name = name;
+  error.stack = `${name}: ${message}${location ? `\n    at ${location}` : ""}`;
+  return error;
+};
+
+const errorEventLocation = (event: ErrorEvent): string | undefined => {
+  if (event.filename === "") return undefined;
+  const line = event.lineno > 0 ? `:${event.lineno}` : "";
+  const column = event.colno > 0 ? `:${event.colno}` : "";
+  return `${event.filename}${line}${column}`;
+};
+
+const errorEventTags = (
+  event: ErrorEvent,
+): Record<string, string> | undefined => {
+  const tags: Record<string, string> = {};
+  if (event.filename !== "") tags.errorFilename = event.filename;
+  if (event.lineno > 0) tags.errorLine = String(event.lineno);
+  if (event.colno > 0) tags.errorColumn = String(event.colno);
+  return Object.keys(tags).length > 0 ? tags : undefined;
+};
+
+const RESOURCE_ERROR_TAGS = new Set([
+  "audio",
+  "embed",
+  "iframe",
+  "image",
+  "img",
+  "input",
+  "link",
+  "object",
+  "script",
+  "source",
+  "track",
+  "video",
+]);
+
+const resourceUrlOf = (element: Element): string | undefined => {
+  const currentSrc = (element as Element & { currentSrc?: unknown }).currentSrc;
+  if (typeof currentSrc === "string" && currentSrc !== "") return currentSrc;
+  for (const attribute of ["src", "href", "data", "srcset", "poster"]) {
+    const value = element.getAttribute(attribute);
+    if (value !== null && value !== "") return value;
+  }
+  return undefined;
 };
 
 const describeElement = (element: Element): string => {
@@ -668,12 +726,40 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // --- auto-instrumentation -------------------------------------------------
 
   if (instrument.globalErrors !== false) {
-    const onError = (event: ErrorEvent): void => {
-      const error =
-        event.error instanceof Error
-          ? event.error
-          : new Error(event.message || "Uncaught error");
-      captureException(error, { level: "error" });
+    const onError = (event: Event): void => {
+      if (event instanceof ErrorEvent) {
+        const location = errorEventLocation(event);
+        const error =
+          event.error !== undefined && event.error !== null
+            ? toError(event.error)
+            : errorWithStack(
+                "Error",
+                event.message || "Uncaught error",
+                location,
+              );
+        captureException(error, {
+          level: "error",
+          tags: errorEventTags(event),
+        });
+        return;
+      }
+
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const resourceType = target.tagName.toLowerCase();
+      if (!RESOURCE_ERROR_TAGS.has(resourceType)) return;
+      const resourceUrl = resourceUrlOf(target);
+      const message = `Failed to load ${resourceType} resource${
+        resourceUrl === undefined ? "" : `: ${resourceUrl}`
+      }`;
+      captureException(errorWithStack("ResourceLoadError", message), {
+        level: "error",
+        tags: {
+          resourceTarget: describeElement(target),
+          resourceType,
+          ...(resourceUrl === undefined ? {} : { resourceUrl }),
+        },
+      });
     };
     window.addEventListener("error", onError, true);
     cleanups.push(() => window.removeEventListener("error", onError, true));

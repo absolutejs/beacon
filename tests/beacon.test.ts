@@ -96,6 +96,22 @@ describe("capture + transport", () => {
     expect(sent[0]?.events[1]?.name).toBe("Weird");
   });
 
+  test("preserves stacks from cross-realm error-like objects", async () => {
+    const { beacon, sent } = make();
+    track(beacon);
+    beacon.captureException({
+      message: "cross-realm failure",
+      name: "TypeError",
+      stack: "TypeError: cross-realm failure\n    at app.js:10:2",
+    });
+    await beacon.flush();
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "cross-realm failure",
+      name: "TypeError",
+      stack: "TypeError: cross-realm failure\n    at app.js:10:2",
+    });
+  });
+
   test("auto-flushes when maxBatch is reached", async () => {
     const { beacon, sent } = make({ maxBatch: 2 });
     track(beacon);
@@ -186,6 +202,84 @@ describe("auto-instrumentation", () => {
     );
     await beacon.flush();
     expect(sent[0]?.events[0]?.message).toBe("uncaught boom");
+  });
+
+  test("preserves browser location when an uncaught error has no Error object", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { globalErrors: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    window.dispatchEvent(
+      new ErrorEvent("error", {
+        colno: 9,
+        filename: "https://cdn.example.com/app.js",
+        lineno: 42,
+        message: "Script error.",
+      }),
+    );
+    await beacon.flush();
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Script error.",
+      name: "Error",
+      stack: "Error: Script error.\n    at https://cdn.example.com/app.js:42:9",
+      tags: {
+        errorColumn: "9",
+        errorFilename: "https://cdn.example.com/app.js",
+        errorLine: "42",
+      },
+    });
+  });
+
+  test("captures resource failures with their target and URL", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { globalErrors: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const script = document.createElement("script");
+    script.id = "analytics";
+    script.src = "/missing.js";
+    document.body.append(script);
+    script.dispatchEvent(new Event("error"));
+    await beacon.flush();
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Failed to load script resource: /missing.js",
+      name: "ResourceLoadError",
+      stack: "ResourceLoadError: Failed to load script resource: /missing.js",
+      tags: {
+        resourceTarget: "script#analytics",
+        resourceType: "script",
+        resourceUrl: "/missing.js",
+      },
+    });
+    script.remove();
+  });
+
+  test("ignores unidentifiable generic error events", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { globalErrors: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    window.dispatchEvent(new Event("error"));
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
   });
 
   test("breadcrumbs fetch calls (and skips its own ingest endpoint)", async () => {
