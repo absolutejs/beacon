@@ -770,8 +770,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const SIGNAL_TEXT_MAX = 180;
   const slowResponseMs = signals?.slowResponseMs ?? SLOW_RESPONSE_DEFAULT_MS;
   const rageCount = signals?.rageClickCount ?? RAGE_COUNT_DEFAULT;
-  // Last request kick-off — a click that triggers a request isn't "dead".
-  let lastNetworkAt = 0;
+  // Exact counters avoid millisecond timestamp ties when a click synchronously
+  // starts a request or opens another browsing context.
+  let networkRequestCount = 0;
+  let externalNavigationCount = 0;
   let inSignalConsole = false;
 
   // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
@@ -1116,13 +1118,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // whether the page responded.
   const observeClickResponse = (
     control: Element,
-    clickedAt: number,
     report: (responded: boolean) => void,
   ): void => {
     const urlBefore = location.href;
     const scrollBefore = window.scrollY;
     const activeBefore = document.activeElement;
     const formBefore = snapshotOwningForm(control);
+    const networkRequestsBefore = networkRequestCount;
+    const externalNavigationsBefore = externalNavigationCount;
     let mutated = false;
     const observer = new MutationObserver(() => {
       mutated = true;
@@ -1140,7 +1143,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         location.href !== urlBefore ||
         window.scrollY !== scrollBefore ||
         document.activeElement !== activeBefore ||
-        lastNetworkAt > clickedAt;
+        networkRequestCount !== networkRequestsBefore ||
+        externalNavigationCount !== externalNavigationsBefore;
       report(responded);
     }, DEAD_CLICK_WINDOW_MS);
   };
@@ -1271,6 +1275,21 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   }
 
   if (instrument.clicks !== false && typeof document !== "undefined") {
+    if (signals !== null) {
+      const originalWindowOpen = window.open;
+      const wrappedWindowOpen = ((
+        ...args: Parameters<typeof window.open>
+      ): ReturnType<typeof window.open> => {
+        externalNavigationCount += 1;
+
+        return originalWindowOpen.apply(window, args);
+      }) as typeof window.open;
+      window.open = wrappedWindowOpen;
+      cleanups.push(() => {
+        if (window.open === wrappedWindowOpen) window.open = originalWindowOpen;
+      });
+    }
+
     let unresponsiveClicks: Array<{
       at: number;
       control: Element;
@@ -1291,7 +1310,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const clickedAt = Date.now();
       const x = event instanceof MouseEvent ? event.clientX : 0;
       const y = event instanceof MouseEvent ? event.clientY : 0;
-      observeClickResponse(control, clickedAt, (responded) => {
+      observeClickResponse(control, (responded) => {
         if (responded) {
           // A response between repeated clicks breaks the rage sequence.
           unresponsiveClicks = unresponsiveClicks.filter(
@@ -1353,7 +1372,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       // Never breadcrumb our own ingest POSTs — avoids a feedback loop.
       if (url.includes(endpoint)) return originalFetch(...args);
       const start = Date.now();
-      lastNetworkAt = start;
+      networkRequestCount += 1;
       try {
         const response = await originalFetch(...args);
         addBreadcrumb({
@@ -1413,6 +1432,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       // Never breadcrumb our own ingest POSTs — avoids a feedback loop.
       if (request !== undefined && !request.url.includes(endpoint)) {
         const start = Date.now();
+        networkRequestCount += 1;
         let outcome: "aborted" | "error" | "timeout" = "error";
         this.addEventListener(
           "abort",

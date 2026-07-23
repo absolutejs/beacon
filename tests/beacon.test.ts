@@ -358,6 +358,75 @@ describe("auto-instrumentation", () => {
     form.remove();
   });
 
+  test("recognizes window.open as an external click response", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const originalOpen = window.open;
+    let openCount = 0;
+    window.open = (() => {
+      openCount += 1;
+
+      return window;
+    }) as typeof window.open;
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    button.addEventListener("click", () => {
+      window.open("/room", "_blank", "noopener");
+    });
+    document.body.append(button);
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(openCount).toBe(1);
+    expect(sent).toHaveLength(0);
+    button.remove();
+    await beacon.close();
+    window.open = originalOpen;
+  });
+
+  test("recognizes same-millisecond fetches as a click response", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const originalFetch = window.fetch;
+    const originalNow = Date.now;
+    window.fetch = Object.assign(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(null, { status: 204 }),
+      { preconnect: (_url: string | URL) => {} },
+    );
+    Date.now = () => 123;
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true, fetch: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    button.addEventListener("click", () => {
+      void window.fetch("/action");
+    });
+    document.body.append(button);
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+    button.remove();
+    await beacon.close();
+    Date.now = originalNow;
+    window.fetch = originalFetch;
+  });
+
   test("does not combine nearby unresponsive controls into a rage click", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
