@@ -863,15 +863,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     });
   };
 
-  // A control clicked with no response (DOM mutation / nav / scroll / focus /
-  // request) within the window — a likely broken control.
-  const detectDeadClick = (target: Element): void => {
-    const control = deadClickCandidate(target);
-    if (control === null) return;
+  // Observe whether a control click produces a visible or asynchronous response.
+  // Dead- and rage-click detection share this so they cannot disagree about
+  // whether the page responded.
+  const observeClickResponse = (
+    control: Element,
+    clickedAt: number,
+    report: (responded: boolean) => void,
+  ): void => {
     const urlBefore = location.href;
     const scrollBefore = window.scrollY;
     const activeBefore = document.activeElement;
-    const clickedAt = Date.now();
     let mutated = false;
     const observer = new MutationObserver(() => {
       mutated = true;
@@ -889,11 +891,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         window.scrollY !== scrollBefore ||
         document.activeElement !== activeBefore ||
         lastNetworkAt > clickedAt;
-      if (responded) return;
-      emitSignal("Dead click — control didn't respond", {
-        signal: "dead_click",
-        target: describeElement(control),
-      });
+      report(responded);
     }, DEAD_CLICK_WINDOW_MS);
   };
 
@@ -1016,34 +1014,57 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   }
 
   if (instrument.clicks !== false && typeof document !== "undefined") {
-    let clickTimes: number[] = [];
-    let lastX = 0;
-    let lastY = 0;
+    let unresponsiveClicks: Array<{
+      at: number;
+      control: Element;
+      x: number;
+      y: number;
+    }> = [];
     const onClick = (event: Event): void => {
       const target = event.target;
       if (!(target instanceof Element)) return;
       addBreadcrumb({ message: describeElement(target), type: "click" });
       if (signals === null) return;
-      if (signals.rageClicks !== false && event instanceof MouseEvent) {
-        const now = Date.now();
-        const near =
-          Math.abs(event.clientX - lastX) < RAGE_RADIUS_PX &&
-          Math.abs(event.clientY - lastY) < RAGE_RADIUS_PX;
-        lastX = event.clientX;
-        lastY = event.clientY;
-        clickTimes = near
-          ? clickTimes.filter((time) => now - time < RAGE_WINDOW_MS)
-          : [];
-        clickTimes.push(now);
-        if (clickTimes.length >= rageCount) {
-          clickTimes = [];
-          emitSignal("Rage click — repeated clicks with no response", {
-            signal: "rage_click",
-            target: describeElement(target),
+      const control = deadClickCandidate(target);
+      if (control === null) return;
+      const detectRage =
+        signals.rageClicks !== false && event instanceof MouseEvent;
+      const detectDead = signals.deadClicks !== false;
+      if (!detectRage && !detectDead) return;
+      const clickedAt = Date.now();
+      const x = event instanceof MouseEvent ? event.clientX : 0;
+      const y = event instanceof MouseEvent ? event.clientY : 0;
+      observeClickResponse(control, clickedAt, (responded) => {
+        if (responded) {
+          // A response between repeated clicks breaks the rage sequence.
+          unresponsiveClicks = unresponsiveClicks.filter(
+            (click) => click.control !== control,
+          );
+          return;
+        }
+        if (detectDead) {
+          emitSignal("Dead click — control didn't respond", {
+            signal: "dead_click",
+            target: describeElement(control),
           });
         }
-      }
-      if (signals.deadClicks !== false) detectDeadClick(target);
+        if (detectRage) {
+          unresponsiveClicks = unresponsiveClicks.filter(
+            (click) =>
+              click.control === control &&
+              clickedAt - click.at < RAGE_WINDOW_MS &&
+              Math.abs(x - click.x) < RAGE_RADIUS_PX &&
+              Math.abs(y - click.y) < RAGE_RADIUS_PX,
+          );
+          unresponsiveClicks.push({ at: clickedAt, control, x, y });
+          if (unresponsiveClicks.length < rageCount) return;
+          unresponsiveClicks = [];
+          emitSignal("Rage click — repeated clicks with no response", {
+            signal: "rage_click",
+            target: describeElement(control),
+          });
+        }
+      });
     };
     document.addEventListener("click", onClick, true);
     cleanups.push(() => document.removeEventListener("click", onClick, true));

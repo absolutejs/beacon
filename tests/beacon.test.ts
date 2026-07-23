@@ -244,6 +244,105 @@ describe("enrichment", () => {
 });
 
 describe("auto-instrumentation", () => {
+  test("reports rage clicks only after repeated clicks on one unresponsive control", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: false, rageClickCount: 3 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    document.body.append(button);
+    for (let count = 0; count < 3; count += 1) {
+      button.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          clientX: 10,
+          clientY: 10,
+        }),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(sent[0]?.events).toHaveLength(1);
+    expect(sent[0]?.events[0]).toMatchObject({
+      level: "warning",
+      message: "Rage click — repeated clicks with no response",
+      tags: { signal: "rage_click", target: "button" },
+    });
+    button.remove();
+  });
+
+  test("does not report rapid clicks when the control responds", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: false, rageClickCount: 3 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    let page = 0;
+    button.addEventListener("click", () => {
+      page += 1;
+      button.dataset.page = String(page);
+    });
+    document.body.append(button);
+    for (let count = 0; count < 3; count += 1) {
+      button.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          clientX: 10,
+          clientY: 10,
+        }),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+    button.remove();
+  });
+
+  test("does not combine nearby unresponsive controls into a rage click", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: false, rageClickCount: 3 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const first = document.createElement("button");
+    const second = document.createElement("button");
+    document.body.append(first, second);
+    for (const button of [first, second, first]) {
+      button.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          clientX: 10,
+          clientY: 10,
+        }),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+    first.remove();
+    second.remove();
+  });
+
   test("captures uncaught window errors", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
