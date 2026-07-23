@@ -71,6 +71,9 @@ beacon.captureMessage("checkout started", "info");
   in `extra.errorCauses`, including database driver error codes and details.
 - **Sampling + redaction** — `sampleRate` and a `beforeSend(event)` hook
   (return `null` to drop).
+- **Resource policy** — `instrument.resourceErrors` accepts a predicate so
+  expected failures such as optional cross-origin images can become grouped
+  warnings while same-origin assets and critical scripts/styles remain errors.
 - **Replay seam** — `getReplayId()` stamps each event with the active
   session-replay id (wired by `@absolutejs/replay`).
 

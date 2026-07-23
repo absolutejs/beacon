@@ -70,6 +70,14 @@ export type BeaconTransport = (request: {
 export type BeaconInstrumentation = {
   /** `window.onerror` / `error` events. Default true. */
   globalErrors?: boolean;
+  /**
+   * Resource-load errors captured by the global `error` listener. Default true.
+   * A predicate can keep a failure as an error, downgrade it to a grouped
+   * warning, or return false to drop it.
+   */
+  resourceErrors?:
+    | boolean
+    | ((failure: BeaconResourceFailure) => "error" | "warning" | false);
   /** `unhandledrejection` events. Default true. */
   unhandledRejections?: boolean;
   /** Breadcrumb `console.error` / `console.warn`. Default true. */
@@ -82,6 +90,13 @@ export type BeaconInstrumentation = {
   xhr?: boolean;
   /** Breadcrumb SPA navigations (`pushState`/`replaceState`/`popstate`). Default true. */
   history?: boolean;
+};
+
+export type BeaconResourceFailure = {
+  crossOrigin: boolean;
+  target: string;
+  type: string;
+  url?: string;
 };
 
 /**
@@ -436,6 +451,25 @@ const resourceUrlOf = (element: Element): string | undefined => {
     if (value !== null && value !== "") return value;
   }
   return undefined;
+};
+
+const isCrossOriginResource = (url: string | undefined): boolean => {
+  if (url === undefined) return false;
+  try {
+    return new URL(url, location.href).origin !== location.origin;
+  } catch {
+    return false;
+  }
+};
+
+const resourceSourceOf = (url: string | undefined): string => {
+  if (url === undefined) return "unknown source";
+  try {
+    const parsed = new URL(url, location.href);
+    return parsed.hostname || parsed.protocol.replace(":", "");
+  } catch {
+    return "unknown source";
+  }
 };
 
 const describeElement = (element: Element): string => {
@@ -889,17 +923,43 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const resourceType = target.tagName.toLowerCase();
       if (!RESOURCE_ERROR_TAGS.has(resourceType)) return;
       const resourceUrl = resourceUrlOf(target);
-      const message = `Failed to load ${resourceType} resource${
-        resourceUrl === undefined ? "" : `: ${resourceUrl}`
-      }`;
-      captureException(errorWithStack("ResourceLoadError", message), {
-        level: "error",
-        tags: {
-          resourceTarget: describeElement(target),
-          resourceType,
-          ...(resourceUrl === undefined ? {} : { resourceUrl }),
+      const failure: BeaconResourceFailure = {
+        crossOrigin: isCrossOriginResource(resourceUrl),
+        target: describeElement(target),
+        type: resourceType,
+        ...(resourceUrl === undefined ? {} : { url: resourceUrl }),
+      };
+      const resourceErrors = instrument.resourceErrors;
+      const resourceLevel =
+        typeof resourceErrors === "function"
+          ? resourceErrors(failure)
+          : resourceErrors === false
+            ? false
+            : "error";
+      if (resourceLevel === false) return;
+      const warning = resourceLevel === "warning";
+      // Warning titles deliberately omit the full URL. The URL remains in tags,
+      // while the stable provider-level message groups an image grid's many
+      // failed URLs into one issue instead of one issue per asset.
+      const message = warning
+        ? `Failed to load ${resourceType} resource from ${resourceSourceOf(resourceUrl)}`
+        : `Failed to load ${resourceType} resource${
+            resourceUrl === undefined ? "" : `: ${resourceUrl}`
+          }`;
+      captureException(
+        errorWithStack(
+          warning ? "ResourceLoadWarning" : "ResourceLoadError",
+          message,
+        ),
+        {
+          level: resourceLevel,
+          tags: {
+            resourceTarget: failure.target,
+            resourceType,
+            ...(resourceUrl === undefined ? {} : { resourceUrl }),
+          },
         },
-      });
+      );
     };
     window.addEventListener("error", onError, true);
     cleanups.push(() => window.removeEventListener("error", onError, true));

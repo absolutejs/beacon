@@ -327,6 +327,58 @@ describe("auto-instrumentation", () => {
     script.remove();
   });
 
+  test("resourceErrors can downgrade and group an expected resource failure", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const failures: Array<{
+      crossOrigin: boolean;
+      target: string;
+      type: string;
+      url?: string;
+    }> = [];
+    const beacon = track(
+      createBeacon({
+        instrument: {
+          globalErrors: true,
+          resourceErrors: (failure) => {
+            failures.push(failure);
+            return failure.type === "img" && failure.crossOrigin
+              ? "warning"
+              : "error";
+          },
+        },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const image = document.createElement("img");
+    image.className = "profile-photo";
+    image.src = "https://images.example.com/profile.jpg";
+    document.body.append(image);
+    image.dispatchEvent(new Event("error"));
+    await beacon.flush();
+    expect(failures).toEqual([
+      {
+        crossOrigin: true,
+        target: "img.profile-photo",
+        type: "img",
+        url: "https://images.example.com/profile.jpg",
+      },
+    ]);
+    expect(sent[0]?.events[0]).toMatchObject({
+      level: "warning",
+      message: "Failed to load img resource from images.example.com",
+      name: "ResourceLoadWarning",
+      tags: {
+        resourceTarget: "img.profile-photo",
+        resourceType: "img",
+        resourceUrl: "https://images.example.com/profile.jpg",
+      },
+    });
+    image.remove();
+  });
+
   test("ignores unidentifiable generic error events", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
