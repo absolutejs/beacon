@@ -575,6 +575,57 @@ const deadClickCandidate = (target: Element): Element | null => {
   return control;
 };
 
+type FormControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+
+const isFormControl = (element: Element): element is FormControl =>
+  element instanceof HTMLInputElement ||
+  element instanceof HTMLSelectElement ||
+  element instanceof HTMLTextAreaElement;
+
+const formControlState = (control: FormControl): string => {
+  if (control instanceof HTMLInputElement) {
+    return `${control.value}\u0000${control.checked ? "checked" : "unchecked"}`;
+  }
+  if (control instanceof HTMLSelectElement) {
+    return `${control.value}\u0000${Array.from(control.options)
+      .map((option) => (option.selected ? "1" : "0"))
+      .join("")}`;
+  }
+  return control.value;
+};
+
+// This snapshot exists only in memory during the click-response window. Form
+// values are compared locally and are never included in Beacon telemetry.
+const snapshotOwningForm = (
+  control: Element,
+): Map<FormControl, string> | null => {
+  const nearest = control.closest("form");
+  const associated =
+    control instanceof HTMLButtonElement || control instanceof HTMLInputElement
+      ? control.form
+      : null;
+  const form = nearest ?? associated;
+  if (form === null) return null;
+  const snapshot = new Map<FormControl, string>();
+  for (const element of Array.from(form.elements)) {
+    if (isFormControl(element)) {
+      snapshot.set(element, formControlState(element));
+    }
+  }
+  return snapshot;
+};
+
+const formStateChanged = (
+  snapshot: Map<FormControl, string> | null,
+): boolean => {
+  if (snapshot === null) return false;
+  for (const [control, state] of snapshot) {
+    if (!control.isConnected || formControlState(control) !== state)
+      return true;
+  }
+  return false;
+};
+
 const VITAL_NAMES = new Set(["LCP", "INP", "CLS", "FCP", "TTFB", "TBT"]);
 const LONG_TASK_MS = 50;
 const TBT_GOOD_MS = 200;
@@ -1071,6 +1122,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const urlBefore = location.href;
     const scrollBefore = window.scrollY;
     const activeBefore = document.activeElement;
+    const formBefore = snapshotOwningForm(control);
     let mutated = false;
     const observer = new MutationObserver(() => {
       mutated = true;
@@ -1084,6 +1136,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       observer.disconnect();
       const responded =
         mutated ||
+        formStateChanged(formBefore) ||
         location.href !== urlBefore ||
         window.scrollY !== scrollBefore ||
         document.activeElement !== activeBefore ||

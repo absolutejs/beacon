@@ -1,6 +1,6 @@
 {
   "name": "@absolutejs/beacon",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "Tiny, zero-dependency browser SDK for the AbsoluteJS observability stack. Captures uncaught errors + unhandled rejections, breadcrumbs (console/click/fetch/history), batches, and POSTs an envelope to @absolutejs/errors/ingest via sendBeacon/keepalive. ~2-5KB gz, no Effect in the browser; end-to-end type-safe via the shared erased envelope contract.",
   "repository": {
     "type": "git",

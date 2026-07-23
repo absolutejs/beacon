@@ -328,6 +328,36 @@ describe("auto-instrumentation", () => {
     button.remove();
   });
 
+  test("recognizes property-only form updates as a click response", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const form = document.createElement("form");
+    const input = document.createElement("input");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.addEventListener("click", () => {
+      input.value = "suggested target";
+    });
+    form.append(input, button);
+    document.body.append(form);
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(input.getAttribute("value")).toBeNull();
+    expect(input.value).toBe("suggested target");
+    expect(sent).toHaveLength(0);
+    form.remove();
+  });
+
   test("does not combine nearby unresponsive controls into a rage click", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
