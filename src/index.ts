@@ -33,6 +33,9 @@ export const BEACON_SIGNAL = {
 
 export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
 
+/** Response header used to correlate a browser signal with its server request. */
+export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
+
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
   signal?: BeaconSignal;
@@ -71,6 +74,8 @@ export type BeaconEnvelope = {
 
 export type CaptureContext = {
   level?: BeaconLevel;
+  traceId?: string;
+  spanId?: string;
   tags?: BeaconTags;
   extra?: Record<string, unknown>;
 };
@@ -823,6 +828,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
     const stack = stackWithCauses(resolved.stack, errorCauses);
     if (stack !== undefined) event.stack = stack;
+    if (context.traceId !== undefined) event.traceId = context.traceId;
+    if (context.spanId !== undefined) event.spanId = context.spanId;
     if (context.tags !== undefined) event.tags = context.tags;
     if (context.extra !== undefined || errorCauses.length > 0)
       event.extra = {
@@ -844,33 +851,55 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const emitSignal = (
     message: string,
     signalTags: BeaconTags & { signal: BeaconSignal },
+    traceId?: string,
   ): void => {
     captureException(new Error(message), {
       level: "warning",
       tags: signalTags,
+      ...(traceId !== undefined ? { traceId } : {}),
     });
+  };
+
+  const responseTraceId = (value: string | null): string | undefined => {
+    const traceId = value?.trim().toLowerCase();
+
+    return traceId !== undefined && /^[0-9a-f]{32}$/.test(traceId)
+      ? traceId
+      : undefined;
   };
 
   const reportResponseSignal = (
     url: string,
+    method: string,
     status: number,
     durationMs: number,
+    traceId?: string,
   ): void => {
     if (signals === null) return;
     if (signals.serverErrors !== false && status >= 500) {
-      emitSignal("Server error response (5xx)", {
-        endpoint: shortUrl(url),
-        signal: BEACON_SIGNAL.HTTP_5XX,
-        status: String(status),
-      });
+      emitSignal(
+        "Server error response (5xx)",
+        {
+          endpoint: shortUrl(url),
+          method,
+          signal: BEACON_SIGNAL.HTTP_5XX,
+          status: String(status),
+        },
+        traceId,
+      );
       return;
     }
     if (signals.slowResponses !== false && durationMs > slowResponseMs) {
-      emitSignal("Slow response", {
-        durationMs: String(durationMs),
-        endpoint: shortUrl(url),
-        signal: BEACON_SIGNAL.SLOW_RESPONSE,
-      });
+      emitSignal(
+        "Slow response",
+        {
+          durationMs: String(durationMs),
+          endpoint: shortUrl(url),
+          method,
+          signal: BEACON_SIGNAL.SLOW_RESPONSE,
+        },
+        traceId,
+      );
     }
   };
 
@@ -1102,7 +1131,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           : input instanceof URL
             ? input.href
             : input.url;
-      const method = init?.method ?? "GET";
+      const method =
+        init?.method ?? (input instanceof Request ? input.method : "GET");
       // Never breadcrumb our own ingest POSTs — avoids a feedback loop.
       if (url.includes(endpoint)) return originalFetch(...args);
       const start = Date.now();
@@ -1114,7 +1144,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           message: `${method} ${url} → ${response.status}`,
           type: "fetch",
         });
-        reportResponseSignal(url, response.status, Date.now() - start);
+        reportResponseSignal(
+          url,
+          method,
+          response.status,
+          Date.now() - start,
+          responseTraceId(response.headers.get(BEACON_TRACE_HEADER)),
+        );
         return response;
       } catch (error) {
         addBreadcrumb({ message: `${method} ${url} → failed`, type: "fetch" });
@@ -1152,12 +1188,24 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const request = meta.get(this);
       // Never breadcrumb our own ingest POSTs — avoids a feedback loop.
       if (request !== undefined && !request.url.includes(endpoint)) {
+        const start = Date.now();
         this.addEventListener("loadend", () => {
           addBreadcrumb({
             data: { status: this.status },
             message: `${request.method} ${request.url} → ${this.status || "failed"}`,
             type: "xhr",
           });
+          if (this.status > 0) {
+            reportResponseSignal(
+              request.url,
+              request.method,
+              this.status,
+              Date.now() - start,
+              responseTraceId(this.getResponseHeader(BEACON_TRACE_HEADER)),
+            );
+          } else {
+            reportFailureSignal(request.url);
+          }
         });
       }
 

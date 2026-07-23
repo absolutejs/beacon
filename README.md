@@ -76,6 +76,9 @@ beacon.captureMessage("checkout started", "info");
   warnings while same-origin assets and critical scripts/styles remain errors.
 - **Replay seam** — `getReplayId()` stamps each event with the active
   session-replay id (wired by `@absolutejs/replay`).
+- **5xx correlation** — fetch and XHR server-error signals preserve the request
+  method and copy a valid trace id from the `x-absolute-trace-id` response
+  header into the event's top-level `traceId`.
 
 ## API
 
@@ -85,7 +88,7 @@ initBeacon(options)   => Beacon   // also sets the global singleton
 getBeacon()           => Beacon | undefined
 
 // Beacon:
-captureException(error, { level?, tags?, extra? })
+captureException(error, { level?, traceId?, spanId?, tags?, extra? })
 captureMessage(message, level?)
 addBreadcrumb({ message, type?, data? })
 setTags(tags) · setUser(user | null)
@@ -96,6 +99,7 @@ close() => Promise<void>          // remove listeners + final flush
 BEACON_SIGNAL.FETCH_FAILED
 BEACON_SIGNAL.SLOW_RESPONSE
 BEACON_SIGNAL.HTTP_5XX
+BEACON_TRACE_HEADER // "x-absolute-trace-id"
 
 // Global helpers (no-op until initBeacon): captureException, captureMessage, addBreadcrumb
 ```

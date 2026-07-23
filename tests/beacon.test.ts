@@ -3,6 +3,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  BEACON_TRACE_HEADER,
   createBeacon,
   type Beacon,
   type BeaconEnvelope,
@@ -65,6 +66,20 @@ describe("capture + transport", () => {
     expect(typeof event.at).toBe("number");
     expect(typeof event.stack).toBe("string");
     expect(typeof event.extra?.sessionId).toBe("string");
+  });
+
+  test("captureException preserves trace and span correlation", async () => {
+    const { beacon, sent } = make();
+    track(beacon);
+    beacon.captureException(new Error("correlated"), {
+      spanId: "0123456789abcdef",
+      traceId: "0123456789abcdef0123456789abcdef",
+    });
+    await beacon.flush();
+    expect(sent[0]?.events[0]).toMatchObject({
+      spanId: "0123456789abcdef",
+      traceId: "0123456789abcdef0123456789abcdef",
+    });
   });
 
   test("empty flush sends nothing", async () => {
@@ -549,6 +564,44 @@ describe("auto-instrumentation", () => {
     const fetchCrumbs = crumbs.filter((c) => c.message.includes("/api/data"));
     expect(fetchCrumbs).toHaveLength(1);
     expect(crumbs.some((c) => c.message.includes("/ingest"))).toBe(false);
+    globalThis.fetch = originalFetch;
+  });
+
+  test("correlates fetch 5xx signals with the server trace", async () => {
+    const originalFetch = globalThis.fetch;
+    const traceId = "0123456789abcdef0123456789abcdef";
+    globalThis.fetch = (async () =>
+      new Response(null, {
+        headers: { [BEACON_TRACE_HEADER]: traceId },
+        status: 503,
+      })) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { serverErrors: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await fetch(
+      new Request("https://example.test/v1/deals", { method: "POST" }),
+    );
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Server error response (5xx)",
+      tags: {
+        endpoint: "https://example.test/v1/deals",
+        method: "POST",
+        signal: "http_5xx",
+        status: "503",
+      },
+      traceId,
+    });
     globalThis.fetch = originalFetch;
   });
 
