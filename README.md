@@ -92,6 +92,11 @@ setTags(tags) · setUser(user | null)
 flush() => Promise<void>          // buffered events out now
 close() => Promise<void>          // remove listeners + final flush
 
+// Typed names for event.tags.signal in beforeSend policies:
+BEACON_SIGNAL.FETCH_FAILED
+BEACON_SIGNAL.SLOW_RESPONSE
+BEACON_SIGNAL.HTTP_5XX
+
 // Global helpers (no-op until initBeacon): captureException, captureMessage, addBreadcrumb
 ```
 

@@ -21,6 +21,23 @@
 
 export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 
+/** Stable names for Beacon's built-in UX and health signals. */
+export const BEACON_SIGNAL = {
+  CONSOLE_ERROR: "console_error",
+  DEAD_CLICK: "dead_click",
+  FETCH_FAILED: "fetch_failed",
+  HTTP_5XX: "http_5xx",
+  RAGE_CLICK: "rage_click",
+  SLOW_RESPONSE: "slow_response",
+} as const;
+
+export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
+
+/** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
+export type BeaconTags = Record<string, string> & {
+  signal?: BeaconSignal;
+};
+
 export type Breadcrumb = {
   /** `Date.now()` when recorded. */
   at: number;
@@ -39,7 +56,7 @@ export type BeaconEvent = {
   traceId?: string;
   spanId?: string;
   replayId?: string;
-  tags?: Record<string, string>;
+  tags?: BeaconTags;
   extra?: Record<string, unknown>;
 };
 
@@ -54,7 +71,7 @@ export type BeaconEnvelope = {
 
 export type CaptureContext = {
   level?: BeaconLevel;
-  tags?: Record<string, string>;
+  tags?: BeaconTags;
   extra?: Record<string, unknown>;
 };
 
@@ -213,7 +230,7 @@ export type Beacon = {
     data?: Record<string, unknown>;
   }) => void;
   /** Merge persistent tags applied to every subsequent event. */
-  setTags: (tags: Record<string, string>) => void;
+  setTags: (tags: BeaconTags) => void;
   /** Set (or clear, with null) the user attached to events. */
   setUser: (user: { id?: string; email?: string } | null) => void;
   /** Flush buffered events now. */
@@ -737,7 +754,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const buffer: BeaconEvent[] = [];
   const breadcrumbs: Breadcrumb[] = [];
   const cleanups: Array<() => void> = [];
-  let tags: Record<string, string> = {};
+  let tags: BeaconTags = {};
   let user: { id?: string; email?: string } | undefined;
 
   const flush = async (useBeacon = false): Promise<void> => {
@@ -826,7 +843,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // groups it) and the variable detail in tags.
   const emitSignal = (
     message: string,
-    signalTags: Record<string, string>,
+    signalTags: BeaconTags & { signal: BeaconSignal },
   ): void => {
     captureException(new Error(message), {
       level: "warning",
@@ -843,7 +860,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     if (signals.serverErrors !== false && status >= 500) {
       emitSignal("Server error response (5xx)", {
         endpoint: shortUrl(url),
-        signal: "http_5xx",
+        signal: BEACON_SIGNAL.HTTP_5XX,
         status: String(status),
       });
       return;
@@ -852,7 +869,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       emitSignal("Slow response", {
         durationMs: String(durationMs),
         endpoint: shortUrl(url),
-        signal: "slow_response",
+        signal: BEACON_SIGNAL.SLOW_RESPONSE,
       });
     }
   };
@@ -861,7 +878,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     if (signals === null || signals.failedRequests === false) return;
     emitSignal("Network request failed", {
       endpoint: shortUrl(url),
-      signal: "fetch_failed",
+      signal: BEACON_SIGNAL.FETCH_FAILED,
     });
   };
 
@@ -1004,7 +1021,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             .join(" ")
             .trim()
             .slice(0, SIGNAL_TEXT_MAX);
-          if (text !== "") emitSignal(text, { signal: "console_error" });
+          if (text !== "")
+            emitSignal(text, { signal: BEACON_SIGNAL.CONSOLE_ERROR });
           inSignalConsole = false;
         }
         original.apply(console, args);
@@ -1046,7 +1064,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         }
         if (detectDead) {
           emitSignal("Dead click — control didn't respond", {
-            signal: "dead_click",
+            signal: BEACON_SIGNAL.DEAD_CLICK,
             target: describeElement(control),
           });
         }
@@ -1062,7 +1080,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           if (unresponsiveClicks.length < rageCount) return;
           unresponsiveClicks = [];
           emitSignal("Rage click — repeated clicks with no response", {
-            signal: "rage_click",
+            signal: BEACON_SIGNAL.RAGE_CLICK,
             target: describeElement(control),
           });
         }
