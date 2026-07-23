@@ -79,6 +79,11 @@ beacon.captureMessage("checkout started", "info");
 - **5xx correlation** — fetch and XHR server-error signals preserve the request
   method and copy a valid trace id from the `x-absolute-trace-id` response
   header into the event's top-level `traceId`.
+- **Actionable click signals** — dead/rage-click issues are grouped by route and
+  stable control descriptor instead of one shared SDK stack. Add
+  `data-beacon-name="save-profile"` when CSS alone is ambiguous. Add
+  `data-beacon-dead-click="ignore"` to controls whose response is outside the
+  page, such as native file, permission, payment, or screen-sharing dialogs.
 
 ## API
 

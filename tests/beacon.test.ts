@@ -3,6 +3,7 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  BEACON_ATTRIBUTE,
   BEACON_TRACE_HEADER,
   createBeacon,
   type Beacon,
@@ -287,9 +288,9 @@ describe("auto-instrumentation", () => {
     expect(sent[0]?.events).toHaveLength(1);
     expect(sent[0]?.events[0]).toMatchObject({
       level: "warning",
-      message: "Rage click — repeated clicks with no response",
       tags: { signal: "rage_click", target: "button" },
     });
+    expect(sent[0]?.events[0]?.message).toEndWith(" — about:blank — button");
     button.remove();
   });
 
@@ -385,6 +386,65 @@ describe("auto-instrumentation", () => {
     expect(sent).toHaveLength(0);
     pressed.remove();
     selected.remove();
+  });
+
+  test("does not report controls marked as externally handled", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    button.setAttribute(BEACON_ATTRIBUTE.DEAD_CLICK, "ignore");
+    document.body.append(button);
+
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+    button.remove();
+  });
+
+  test("separates dead-click issues by stable control name", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const save = document.createElement("button");
+    save.setAttribute(BEACON_ATTRIBUTE.NAME, "save-profile");
+    const remove = document.createElement("button");
+    remove.setAttribute(BEACON_ATTRIBUTE.NAME, "remove-profile");
+    document.body.append(save, remove);
+
+    save.click();
+    remove.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+
+    expect(sent[0]?.events.map(({ message }) => message)).toEqual([
+      "Dead click — control didn't respond — about:blank — button[save-profile]",
+      "Dead click — control didn't respond — about:blank — button[remove-profile]",
+    ]);
+    expect(sent[0]?.events.map(({ tags }) => tags?.target)).toEqual([
+      "button[save-profile]",
+      "button[remove-profile]",
+    ]);
+    save.remove();
+    remove.remove();
   });
 
   test("captures uncaught window errors", async () => {

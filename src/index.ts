@@ -33,6 +33,12 @@ export const BEACON_SIGNAL = {
 
 export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
 
+/** Stable DOM attributes understood by Beacon's click instrumentation. */
+export const BEACON_ATTRIBUTE = {
+  DEAD_CLICK: "data-beacon-dead-click",
+  NAME: "data-beacon-name",
+} as const;
+
 /** Response header used to correlate a browser signal with its server request. */
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
@@ -496,6 +502,12 @@ const resourceSourceOf = (url: string | undefined): string => {
 
 const describeElement = (element: Element): string => {
   const tag = element.tagName.toLowerCase();
+  const beaconName = element
+    .getAttribute(BEACON_ATTRIBUTE.NAME)
+    ?.trim()
+    .replace(/[^a-zA-Z0-9:_-]+/g, "-")
+    .slice(0, 64);
+  if (beaconName) return `${tag}[${beaconName}]`;
   const id = element.id ? `#${element.id}` : "";
   const cls =
     typeof element.className === "string" && element.className.trim() !== ""
@@ -533,6 +545,7 @@ const deadClickCandidate = (target: Element): Element | null => {
   );
   if (control === null) return null;
   if (
+    control.getAttribute(BEACON_ATTRIBUTE.DEAD_CLICK) === "ignore" ||
     control.hasAttribute("disabled") ||
     control.getAttribute("aria-disabled") === "true" ||
     control.getAttribute("aria-pressed") === "true" ||
@@ -943,6 +956,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }, DEAD_CLICK_WINDOW_MS);
   };
 
+  // The route + stable control descriptor belongs in the message because
+  // @absolutejs/errors fingerprints browser events from name/message/stack.
+  // Keeping it only in tags would collapse unrelated controls into one issue.
+  const clickSignalMessage = (message: string, control: Element): string =>
+    `${message} — ${shortUrl(location.href)} — ${describeElement(control)}`;
+
   // --- auto-instrumentation -------------------------------------------------
 
   if (instrument.globalErrors !== false) {
@@ -1092,10 +1111,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           return;
         }
         if (detectDead) {
-          emitSignal("Dead click — control didn't respond", {
-            signal: BEACON_SIGNAL.DEAD_CLICK,
-            target: describeElement(control),
-          });
+          emitSignal(
+            clickSignalMessage("Dead click — control didn't respond", control),
+            {
+              signal: BEACON_SIGNAL.DEAD_CLICK,
+              target: describeElement(control),
+            },
+          );
         }
         if (detectRage) {
           unresponsiveClicks = unresponsiveClicks.filter(
@@ -1108,10 +1130,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           unresponsiveClicks.push({ at: clickedAt, control, x, y });
           if (unresponsiveClicks.length < rageCount) return;
           unresponsiveClicks = [];
-          emitSignal("Rage click — repeated clicks with no response", {
-            signal: BEACON_SIGNAL.RAGE_CLICK,
-            target: describeElement(control),
-          });
+          emitSignal(
+            clickSignalMessage(
+              "Rage click — repeated clicks with no response",
+              control,
+            ),
+            {
+              signal: BEACON_SIGNAL.RAGE_CLICK,
+              target: describeElement(control),
+            },
+          );
         }
       });
     };
