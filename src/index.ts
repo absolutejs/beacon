@@ -565,7 +565,9 @@ const deadClickCandidate = (target: Element): Element | null => {
     control.hasAttribute("disabled") ||
     control.getAttribute("aria-disabled") === "true" ||
     control.getAttribute("aria-pressed") === "true" ||
-    control.getAttribute("aria-selected") === "true"
+    control.getAttribute("aria-selected") === "true" ||
+    (control.hasAttribute("aria-current") &&
+      control.getAttribute("aria-current") !== "false")
   ) {
     return null;
   }

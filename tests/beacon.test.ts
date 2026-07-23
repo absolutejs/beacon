@@ -458,7 +458,7 @@ describe("auto-instrumentation", () => {
     second.remove();
   });
 
-  test("does not report active pressed or selected controls as dead clicks", async () => {
+  test("does not report active pressed, selected, or current controls as dead clicks", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
       createBeacon({
@@ -475,16 +475,46 @@ describe("auto-instrumentation", () => {
     const selected = document.createElement("button");
     selected.setAttribute("role", "tab");
     selected.setAttribute("aria-selected", "true");
-    document.body.append(pressed, selected);
+    const current = document.createElement("a");
+    current.href = "/current";
+    current.setAttribute("aria-current", "page");
+    document.body.append(pressed, selected, current);
 
     pressed.click();
     selected.click();
+    current.click();
     await new Promise((resolve) => setTimeout(resolve, 1600));
     await beacon.flush();
 
     expect(sent).toHaveLength(0);
     pressed.remove();
     selected.remove();
+    current.remove();
+  });
+
+  test("still reports aria-current false controls as dead clicks", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    button.setAttribute("aria-current", "false");
+    document.body.append(button);
+
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+
+    expect(sent[0]?.events).toHaveLength(1);
+    expect(sent[0]?.events[0]?.tags?.signal).toBe("dead_click");
+    button.remove();
   });
 
   test("does not report controls marked as externally handled", async () => {
