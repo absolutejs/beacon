@@ -665,6 +665,172 @@ describe("auto-instrumentation", () => {
     globalThis.fetch = originalFetch;
   });
 
+  test("preserves actionable context for an isolated fetch failure", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { failedRequests: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await fetch("/v1/deals", { method: "POST" }).catch(() => undefined);
+    await beacon.flush();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.events).toHaveLength(1);
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Network request failed — POST /v1/deals",
+      tags: {
+        attemptCount: "1",
+        endpoint: "/v1/deals",
+        endpointCount: "1",
+        endpoints: "/v1/deals",
+        failureKind: "transport",
+        method: "POST",
+        signal: "fetch_failed",
+        transport: "fetch",
+      },
+    });
+    expect(sent[0]?.events[0]?.extra?.networkFailures).toEqual([
+      expect.objectContaining({
+        durationMs: expect.any(Number),
+        endpoint: "/v1/deals",
+        error: expect.objectContaining({
+          message: "Failed to fetch",
+          name: "TypeError",
+          stack: expect.stringContaining("TypeError: Failed to fetch"),
+        }),
+        method: "POST",
+        online: expect.any(Boolean),
+        transport: "fetch",
+        visibilityState: expect.any(String),
+      }),
+    ]);
+    globalThis.fetch = originalFetch;
+  });
+
+  test("aggregates a concurrent connectivity interruption without losing attempts", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { failedRequests: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await Promise.allSettled([
+      fetch("/v1/support/list"),
+      fetch("/v1/notifications"),
+    ]);
+    await beacon.flush();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.events).toHaveLength(1);
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Network connectivity interruption",
+      tags: {
+        attemptCount: "2",
+        endpointCount: "2",
+        endpoints: "/v1/support/list,/v1/notifications",
+        failureKind: "transport",
+        method: "GET",
+        signal: "fetch_failed",
+        transport: "fetch",
+      },
+    });
+    expect(sent[0]?.events[0]?.extra?.networkFailures).toEqual([
+      expect.objectContaining({ endpoint: "/v1/support/list" }),
+      expect.objectContaining({ endpoint: "/v1/notifications" }),
+    ]);
+    globalThis.fetch = originalFetch;
+  });
+
+  test("classifies browser-offline failures separately", async () => {
+    const originalFetch = globalThis.fetch;
+    const onlineDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "onLine",
+    );
+    Object.defineProperty(navigator, "onLine", {
+      configurable: true,
+      value: false,
+    });
+    globalThis.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { failedRequests: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await fetch("/v1/deals").catch(() => undefined);
+    if (onlineDescriptor === undefined)
+      Reflect.deleteProperty(navigator, "onLine");
+    else Object.defineProperty(navigator, "onLine", onlineDescriptor);
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Browser offline — network requests failed",
+      tags: {
+        failureKind: "offline",
+        online: "false",
+        signal: "fetch_failed",
+      },
+    });
+    expect(sent[0]?.events[0]?.extra?.networkFailures).toEqual([
+      expect.objectContaining({ online: false }),
+    ]);
+    globalThis.fetch = originalFetch;
+  });
+
+  test("keeps aborted fetches as breadcrumbs instead of issues", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new DOMException("The operation was aborted", "AbortError");
+    }) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { failedRequests: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await fetch("/v1/notifications/stream").catch(() => undefined);
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+    globalThis.fetch = originalFetch;
+  });
+
   test("close() restores wrapped globals + does a final flush", async () => {
     const before = console.error;
     const sent: BeaconEnvelope[] = [];

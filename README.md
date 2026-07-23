@@ -84,6 +84,11 @@ beacon.captureMessage("checkout started", "info");
   `data-beacon-name="save-profile"` when CSS alone is ambiguous. Add
   `data-beacon-dead-click="ignore"` to controls whose response is outside the
   page, such as native file, permission, payment, or screen-sharing dialogs.
+- **Actionable network signals** — expected aborts remain breadcrumbs instead of
+  issues; offline, timeout, isolated-endpoint, and multi-endpoint connectivity
+  failures are classified separately. Concurrent failures become one event with
+  every attempt, method, endpoint, duration, original error/stack, online state,
+  transport, and page visibility preserved in `extra.networkFailures`.
 
 ## API
 

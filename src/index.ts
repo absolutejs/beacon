@@ -154,6 +154,22 @@ export type BeaconSignals = {
   slowResponseMs?: number;
 };
 
+export type BeaconNetworkFailure = {
+  at: number;
+  durationMs: number;
+  endpoint: string;
+  error: {
+    message: string;
+    name: string;
+    properties?: Record<string, unknown>;
+    stack?: string;
+  };
+  method: string;
+  online: boolean | null;
+  transport: "fetch" | "xhr";
+  visibilityState: string;
+};
+
 export type BeaconOptions = {
   /** Project id (required) — scopes issues server-side. */
   project: string;
@@ -772,10 +788,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const buffer: BeaconEvent[] = [];
   const breadcrumbs: Breadcrumb[] = [];
   const cleanups: Array<() => void> = [];
+  let flushPendingNetworkFailures = (): void => {};
   let tags: BeaconTags = {};
   let user: { id?: string; email?: string } | undefined;
 
   const flush = async (useBeacon = false): Promise<void> => {
+    flushPendingNetworkFailures();
     if (buffer.length === 0) return;
     const events = buffer.splice(0, buffer.length);
     const envelope: BeaconEnvelope = {
@@ -865,11 +883,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     message: string,
     signalTags: BeaconTags & { signal: BeaconSignal },
     traceId?: string,
+    extra?: Record<string, unknown>,
   ): void => {
     captureException(new Error(message), {
       level: "warning",
       tags: signalTags,
       ...(traceId !== undefined ? { traceId } : {}),
+      ...(extra !== undefined ? { extra } : {}),
     });
   };
 
@@ -916,12 +936,128 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
   };
 
-  const reportFailureSignal = (url: string): void => {
+  type NetworkFailureKind = "offline" | "timeout" | "transport";
+  const NETWORK_FAILURE_BURST_MS = 100;
+  const pendingNetworkFailures = new Map<
+    NetworkFailureKind,
+    BeaconNetworkFailure[]
+  >();
+  let networkFailureTimer: number | undefined;
+
+  const networkState = () => {
+    const online: boolean | null =
+      typeof navigator.onLine === "boolean" ? navigator.onLine : null;
+
+    return {
+      online,
+      visibilityState:
+        typeof document.visibilityState === "string"
+          ? document.visibilityState
+          : "unknown",
+    };
+  };
+
+  const failureKind = (error: Error): NetworkFailureKind | "aborted" => {
+    if (error.name === "AbortError") return "aborted";
+    if (error.name === "TimeoutError") return "timeout";
+    if (typeof navigator.onLine === "boolean" && !navigator.onLine)
+      return "offline";
+    return "transport";
+  };
+
+  const failureMessage = (
+    kind: NetworkFailureKind,
+    failures: BeaconNetworkFailure[],
+    endpoints: string[],
+  ): string => {
+    if (kind === "offline") return "Browser offline — network requests failed";
+    if (endpoints.length > 1) return "Network connectivity interruption";
+    const failure = failures[0]!;
+    if (kind === "timeout")
+      return `Network request timed out — ${failure.method} ${failure.endpoint}`;
+    return `Network request failed — ${failure.method} ${failure.endpoint}`;
+  };
+
+  const flushNetworkFailures = (): void => {
+    if (networkFailureTimer !== undefined) {
+      window.clearTimeout(networkFailureTimer);
+      networkFailureTimer = undefined;
+    }
+    const groups = [...pendingNetworkFailures.entries()];
+    pendingNetworkFailures.clear();
+    for (const [kind, failures] of groups) {
+      const endpoints = [...new Set(failures.map(({ endpoint }) => endpoint))];
+      const methods = [...new Set(failures.map(({ method }) => method))];
+      const onlineStates = [
+        ...new Set(failures.map(({ online }) => String(online))),
+      ];
+      const transports = [
+        ...new Set(failures.map(({ transport }) => transport)),
+      ];
+      const visibilityStates = [
+        ...new Set(failures.map(({ visibilityState }) => visibilityState)),
+      ];
+      emitSignal(
+        failureMessage(kind, failures, endpoints),
+        {
+          attemptCount: String(failures.length),
+          endpointCount: String(endpoints.length),
+          endpoints: endpoints.join(","),
+          failureKind: kind,
+          method: methods.length === 1 ? methods[0]! : "multiple",
+          online: onlineStates.length === 1 ? onlineStates[0]! : "mixed",
+          signal: BEACON_SIGNAL.FETCH_FAILED,
+          transport: transports.length === 1 ? transports[0]! : "multiple",
+          visibilityState:
+            visibilityStates.length === 1 ? visibilityStates[0]! : "mixed",
+          ...(endpoints.length === 1 ? { endpoint: endpoints[0]! } : {}),
+        },
+        undefined,
+        { networkFailures: failures },
+      );
+    }
+  };
+  flushPendingNetworkFailures = flushNetworkFailures;
+
+  const reportFailureSignal = (
+    url: string,
+    method: string,
+    durationMs: number,
+    transportKind: BeaconNetworkFailure["transport"],
+    errorValue: unknown,
+  ): void => {
     if (signals === null || signals.failedRequests === false) return;
-    emitSignal("Network request failed", {
+    const error = toError(errorValue);
+    const kind = failureKind(error);
+    // Request cancellation is an expected browser/application lifecycle event.
+    // It remains a breadcrumb but must not create an issue.
+    if (kind === "aborted") return;
+    const properties = errorProperties(error);
+    const state = networkState();
+    const failure: BeaconNetworkFailure = {
+      at: Date.now(),
+      durationMs,
       endpoint: shortUrl(url),
-      signal: BEACON_SIGNAL.FETCH_FAILED,
-    });
+      error: {
+        message: error.message,
+        name: error.name,
+        ...(properties !== undefined ? { properties } : {}),
+        ...(error.stack !== undefined ? { stack: error.stack } : {}),
+      },
+      method: method.toUpperCase(),
+      online: state.online,
+      transport: transportKind,
+      visibilityState: state.visibilityState,
+    };
+    const pending = pendingNetworkFailures.get(kind);
+    if (pending === undefined) pendingNetworkFailures.set(kind, [failure]);
+    else pending.push(failure);
+    if (networkFailureTimer === undefined) {
+      networkFailureTimer = window.setTimeout(
+        flushNetworkFailures,
+        NETWORK_FAILURE_BURST_MS,
+      );
+    }
   };
 
   // Observe whether a control click produces a visible or asynchronous response.
@@ -1181,8 +1317,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         );
         return response;
       } catch (error) {
-        addBreadcrumb({ message: `${method} ${url} → failed`, type: "fetch" });
-        reportFailureSignal(url);
+        const resolved = toError(error);
+        const outcome =
+          failureKind(resolved) === "aborted" ? "aborted" : "failed";
+        addBreadcrumb({
+          data: { errorMessage: resolved.message, errorName: resolved.name },
+          message: `${method} ${url} → ${outcome}`,
+          type: "fetch",
+        });
+        reportFailureSignal(url, method, Date.now() - start, "fetch", error);
         throw error;
       }
     };
@@ -1217,24 +1360,75 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       // Never breadcrumb our own ingest POSTs — avoids a feedback loop.
       if (request !== undefined && !request.url.includes(endpoint)) {
         const start = Date.now();
-        this.addEventListener("loadend", () => {
-          addBreadcrumb({
-            data: { status: this.status },
-            message: `${request.method} ${request.url} → ${this.status || "failed"}`,
-            type: "xhr",
-          });
-          if (this.status > 0) {
-            reportResponseSignal(
-              request.url,
-              request.method,
-              this.status,
-              Date.now() - start,
-              responseTraceId(this.getResponseHeader(BEACON_TRACE_HEADER)),
-            );
-          } else {
-            reportFailureSignal(request.url);
-          }
-        });
+        let outcome: "aborted" | "error" | "timeout" = "error";
+        this.addEventListener(
+          "abort",
+          () => {
+            outcome = "aborted";
+          },
+          { once: true },
+        );
+        this.addEventListener(
+          "error",
+          () => {
+            outcome = "error";
+          },
+          { once: true },
+        );
+        this.addEventListener(
+          "timeout",
+          () => {
+            outcome = "timeout";
+          },
+          { once: true },
+        );
+        this.addEventListener(
+          "loadend",
+          () => {
+            const failed = this.status === 0;
+            addBreadcrumb({
+              data: {
+                status: this.status,
+                ...(failed ? { outcome } : {}),
+              },
+              message: `${request.method} ${request.url} → ${
+                failed ? outcome : this.status
+              }`,
+              type: "xhr",
+            });
+            if (!failed) {
+              reportResponseSignal(
+                request.url,
+                request.method,
+                this.status,
+                Date.now() - start,
+                responseTraceId(this.getResponseHeader(BEACON_TRACE_HEADER)),
+              );
+            } else {
+              const error = new Error(
+                outcome === "timeout"
+                  ? "XMLHttpRequest timed out"
+                  : outcome === "aborted"
+                    ? "XMLHttpRequest was aborted"
+                    : "XMLHttpRequest completed with status 0",
+              );
+              error.name =
+                outcome === "timeout"
+                  ? "TimeoutError"
+                  : outcome === "aborted"
+                    ? "AbortError"
+                    : "XMLHttpRequestError";
+              reportFailureSignal(
+                request.url,
+                request.method,
+                Date.now() - start,
+                "xhr",
+                error,
+              );
+            }
+          },
+          { once: true },
+        );
       }
 
       return originalSend.apply(this, args);
