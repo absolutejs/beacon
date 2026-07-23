@@ -228,6 +228,7 @@ const toError = (value: unknown): Error => {
   if (typeof value === "string") return new Error(value);
   if (typeof value === "object" && value !== null) {
     const object = value as {
+      cause?: unknown;
       message?: unknown;
       name?: unknown;
       stack?: unknown;
@@ -239,9 +240,141 @@ const toError = (value: unknown): Error => {
     const error = new Error(message);
     if (typeof object.name === "string") error.name = object.name;
     if (typeof object.stack === "string") error.stack = object.stack;
+    if (object.cause !== undefined) error.cause = object.cause;
     return error;
   }
   return new Error(String(value));
+};
+
+type CapturedErrorCause = {
+  name: string;
+  message: string;
+  stack?: string;
+  properties?: Record<string, unknown>;
+};
+
+const ERROR_STANDARD_PROPERTIES = new Set([
+  "cause",
+  "message",
+  "name",
+  "stack",
+]);
+const MAX_ERROR_CAUSE_DEPTH = 16;
+const MAX_ERROR_PROPERTY_DEPTH = 5;
+
+const safePropertyValue = (
+  value: unknown,
+  seen: Set<unknown>,
+  depth = 0,
+): unknown => {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return value;
+  if (typeof value === "number")
+    return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "bigint" || typeof value === "symbol")
+    return String(value);
+  if (typeof value === "undefined") return "undefined";
+  if (typeof value === "function")
+    return `[Function ${value.name || "anonymous"}]`;
+  if (depth >= MAX_ERROR_PROPERTY_DEPTH) return "[Truncated]";
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  try {
+    if (Array.isArray(value))
+      return value.map((item) => safePropertyValue(item, seen, depth + 1));
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      try {
+        out[key] = safePropertyValue(
+          (value as Record<string, unknown>)[key],
+          seen,
+          depth + 1,
+        );
+      } catch (error) {
+        out[key] = `[Unserializable: ${toError(error).message}]`;
+      }
+    }
+    return out;
+  } finally {
+    seen.delete(value);
+  }
+};
+
+const errorProperties = (
+  value: unknown,
+): Record<string, unknown> | undefined => {
+  if (typeof value !== "object" || value === null) return undefined;
+  const out: Record<string, unknown> = {};
+  let propertyNames: string[];
+  try {
+    propertyNames = Object.getOwnPropertyNames(value);
+  } catch {
+    return undefined;
+  }
+  for (const key of propertyNames) {
+    if (ERROR_STANDARD_PROPERTIES.has(key)) continue;
+    try {
+      out[key] = safePropertyValue(
+        (value as Record<string, unknown>)[key],
+        new Set([value]),
+      );
+    } catch (error) {
+      out[key] = `[Unserializable: ${toError(error).message}]`;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+};
+
+const errorCause = (value: unknown): unknown => {
+  if (typeof value !== "object" || value === null) return undefined;
+  try {
+    return (value as { cause?: unknown }).cause;
+  } catch {
+    return undefined;
+  }
+};
+
+const captureErrorCauses = (error: Error): CapturedErrorCause[] => {
+  const causes: CapturedErrorCause[] = [];
+  const seen = new Set<unknown>([error]);
+  let cause = errorCause(error);
+  while (cause !== undefined && causes.length < MAX_ERROR_CAUSE_DEPTH) {
+    if (seen.has(cause)) {
+      causes.push({
+        message: "Cause chain references an earlier error",
+        name: "CircularErrorCause",
+      });
+      return causes;
+    }
+    if (typeof cause === "object" && cause !== null) seen.add(cause);
+    const resolved = toError(cause);
+    const captured: CapturedErrorCause = {
+      message: resolved.message,
+      name: resolved.name,
+    };
+    if (resolved.stack !== undefined) captured.stack = resolved.stack;
+    const properties = errorProperties(cause);
+    if (properties !== undefined) captured.properties = properties;
+    causes.push(captured);
+    cause = errorCause(cause);
+  }
+  if (cause !== undefined)
+    causes.push({
+      message: `Cause chain exceeded ${MAX_ERROR_CAUSE_DEPTH} levels`,
+      name: "TruncatedErrorCause",
+    });
+  return causes;
+};
+
+const stackWithCauses = (
+  stack: string | undefined,
+  causes: CapturedErrorCause[],
+): string | undefined => {
+  if (causes.length === 0) return stack;
+  const sections = causes.map(
+    (cause) => `Caused by: ${cause.stack ?? `${cause.name}: ${cause.message}`}`,
+  );
+  return [stack, ...sections].filter((part) => part !== undefined).join("\n");
 };
 
 const safeStringify = (value: unknown): string => {
@@ -327,7 +460,8 @@ const shortUrl = (url: string): string => {
 // An anchor whose click does something invisible to us (new tab / download /
 // off-site nav) — so "nothing changed on this page" doesn't make it "dead".
 const isInvisibleAnchor = (anchor: HTMLAnchorElement): boolean => {
-  if (anchor.target === "_blank" || anchor.hasAttribute("download")) return true;
+  if (anchor.target === "_blank" || anchor.hasAttribute("download"))
+    return true;
   try {
     return new URL(anchor.href, location.origin).origin !== location.origin;
   } catch {
@@ -628,14 +762,20 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     context = {},
   ) => {
     const resolved = toError(error);
+    const errorCauses = captureErrorCauses(resolved);
     const event: BeaconEvent = {
       level: context.level ?? "error",
       message: resolved.message,
       name: resolved.name,
     };
-    if (resolved.stack !== undefined) event.stack = resolved.stack;
+    const stack = stackWithCauses(resolved.stack, errorCauses);
+    if (stack !== undefined) event.stack = stack;
     if (context.tags !== undefined) event.tags = context.tags;
-    if (context.extra !== undefined) event.extra = context.extra;
+    if (context.extra !== undefined || errorCauses.length > 0)
+      event.extra = {
+        ...context.extra,
+        ...(errorCauses.length > 0 ? { errorCauses } : {}),
+      };
     push(event);
   };
 
@@ -799,7 +939,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           !inSignalConsole
         ) {
           inSignalConsole = true;
-          const text = args.map(String).join(" ").trim().slice(0, SIGNAL_TEXT_MAX);
+          const text = args
+            .map(String)
+            .join(" ")
+            .trim()
+            .slice(0, SIGNAL_TEXT_MAX);
           if (text !== "") emitSignal(text, { signal: "console_error" });
           inSignalConsole = false;
         }
@@ -896,10 +1040,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     ) {
       meta.set(this, { method: String(method), url: String(url) });
 
-      return originalOpen.apply(
-        this,
-        [method, url, ...rest] as Parameters<typeof originalOpen>,
-      );
+      return originalOpen.apply(this, [method, url, ...rest] as Parameters<
+        typeof originalOpen
+      >);
     } as typeof XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.send = function (
       this: XMLHttpRequest,

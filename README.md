@@ -67,6 +67,8 @@ beacon.captureMessage("checkout started", "info");
 - **Batching** — buffers up to `maxBatch` (default 30) / `flushIntervalMs`
   (default 5s); flushes reliably on `pagehide` / tab-hidden via `sendBeacon`.
 - **Context** — `setTags`, `setUser`, per-call `tags`/`extra`, a per-session id.
+- **Cause chains** — preserves nested `Error.cause` stacks and diagnostic fields
+  in `extra.errorCauses`, including database driver error codes and details.
 - **Sampling + redaction** — `sampleRate` and a `beforeSend(event)` hook
   (return `null` to drop).
 - **Replay seam** — `getReplayId()` stamps each event with the active

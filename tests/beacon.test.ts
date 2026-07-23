@@ -112,6 +112,67 @@ describe("capture + transport", () => {
     });
   });
 
+  test("preserves nested error causes in the stack and structured extra", async () => {
+    const { beacon, sent } = make();
+    track(beacon);
+    const postgresError = Object.assign(new Error("connection terminated"), {
+      code: "57P01",
+      severity: "FATAL",
+    });
+    const queryError = new Error("Failed query", { cause: postgresError });
+    beacon.captureException(queryError, { extra: { operation: "reapStuck" } });
+    await beacon.flush();
+
+    const event = sent[0]?.events[0];
+    expect(event?.stack).toContain("Caused by: Error: connection terminated");
+    expect(event?.extra?.operation).toBe("reapStuck");
+    expect(event?.extra?.errorCauses).toEqual([
+      expect.objectContaining({
+        message: "connection terminated",
+        name: "Error",
+        properties: expect.objectContaining({
+          code: "57P01",
+          severity: "FATAL",
+        }),
+        stack: expect.stringContaining("Error: connection terminated"),
+      }),
+    ]);
+  });
+
+  test("preserves cross-realm cause chains and terminates circular chains", async () => {
+    const { beacon, sent } = make();
+    track(beacon);
+    const cause: {
+      cause?: unknown;
+      message: string;
+      name: string;
+      stack: string;
+    } = {
+      message: "driver failed",
+      name: "DriverError",
+      stack: "DriverError: driver failed\n    at driver.js:2:1",
+    };
+    cause.cause = cause;
+    beacon.captureException({
+      cause,
+      message: "query failed",
+      name: "QueryError",
+      stack: "QueryError: query failed\n    at query.js:1:1",
+    });
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]?.extra?.errorCauses).toEqual([
+      expect.objectContaining({
+        message: "driver failed",
+        name: "DriverError",
+      }),
+      {
+        message: "Cause chain references an earlier error",
+        name: "CircularErrorCause",
+      },
+    ]);
+  });
+
   test("auto-flushes when maxBatch is reached", async () => {
     const { beacon, sent } = make({ maxBatch: 2 });
     track(beacon);
