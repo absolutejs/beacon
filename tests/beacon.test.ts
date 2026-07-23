@@ -343,6 +343,35 @@ describe("auto-instrumentation", () => {
     second.remove();
   });
 
+  test("does not report active pressed or selected controls as dead clicks", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const pressed = document.createElement("button");
+    pressed.setAttribute("aria-pressed", "true");
+    const selected = document.createElement("button");
+    selected.setAttribute("role", "tab");
+    selected.setAttribute("aria-selected", "true");
+    document.body.append(pressed, selected);
+
+    pressed.click();
+    selected.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+    pressed.remove();
+    selected.remove();
+  });
+
   test("captures uncaught window errors", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
