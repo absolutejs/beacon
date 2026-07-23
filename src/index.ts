@@ -455,6 +455,15 @@ const errorWithStack = (
   return error;
 };
 
+const errorWithoutStack = (name: string, message: string): Error => {
+  const error = new Error(message);
+  error.name = name;
+  // Resource `error` events expose the failed element but no JavaScript call
+  // stack. Do not misrepresent the synthetic Error header as captured frames.
+  delete error.stack;
+  return error;
+};
+
 const errorEventLocation = (event: ErrorEvent): string | undefined => {
   if (event.filename === "") return undefined;
   const line = event.lineno > 0 ? `:${event.lineno}` : "";
@@ -1207,7 +1216,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             resourceUrl === undefined ? "" : `: ${resourceUrl}`
           }`;
       captureException(
-        errorWithStack(
+        errorWithoutStack(
           warning ? "ResourceLoadWarning" : "ResourceLoadError",
           message,
         ),

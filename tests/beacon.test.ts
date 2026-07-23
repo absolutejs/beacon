@@ -649,13 +649,13 @@ describe("auto-instrumentation", () => {
     expect(sent[0]?.events[0]).toMatchObject({
       message: "Failed to load script resource: /missing.js",
       name: "ResourceLoadError",
-      stack: "ResourceLoadError: Failed to load script resource: /missing.js",
       tags: {
         resourceTarget: "script#analytics",
         resourceType: "script",
         resourceUrl: "/missing.js",
       },
     });
+    expect(sent[0]?.events[0]).not.toHaveProperty("stack");
     script.remove();
   });
 
@@ -708,6 +708,7 @@ describe("auto-instrumentation", () => {
         resourceUrl: "https://images.example.com/profile.jpg",
       },
     });
+    expect(sent[0]?.events[0]).not.toHaveProperty("stack");
     image.remove();
   });
 
