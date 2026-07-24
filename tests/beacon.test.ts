@@ -961,6 +961,76 @@ describe("auto-instrumentation", () => {
     globalThis.fetch = originalFetch;
   });
 
+  test("console error signals start their stack at the application caller", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, console: true },
+        project: "web",
+        signals: { consoleErrors: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    function applicationConsoleCaller() {
+      console.error("application console failure");
+    }
+
+    applicationConsoleCaller();
+    await beacon.flush();
+
+    const stack = sent[0]?.events[0]?.stack;
+    expect(stack).toContain("applicationConsoleCaller");
+    expect(stack).not.toContain("emitSignal");
+    expect(stack).not.toContain("wrappedConsole");
+  });
+
+  test("console stack trimming works without Error.captureStackTrace", async () => {
+    const captureStackTraceDescriptor = Object.getOwnPropertyDescriptor(
+      Error,
+      "captureStackTrace",
+    );
+    Object.defineProperty(Error, "captureStackTrace", {
+      configurable: true,
+      value: undefined,
+    });
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, console: true },
+        project: "web",
+        signals: { consoleErrors: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    function applicationConsoleCaller() {
+      console.error("portable console failure");
+    }
+
+    try {
+      applicationConsoleCaller();
+      await beacon.flush();
+    } finally {
+      if (captureStackTraceDescriptor !== undefined) {
+        Object.defineProperty(
+          Error,
+          "captureStackTrace",
+          captureStackTraceDescriptor,
+        );
+      } else {
+        Reflect.deleteProperty(Error, "captureStackTrace");
+      }
+    }
+
+    const stack = sent[0]?.events[0]?.stack;
+    expect(stack).toContain("applicationConsoleCaller");
+    expect(stack).not.toContain("emitSignal");
+    expect(stack).not.toContain("wrappedConsole");
+  });
+
   test("close() restores wrapped globals + does a final flush", async () => {
     const before = console.error;
     const sent: BeaconEnvelope[] = [];

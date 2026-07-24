@@ -948,8 +948,35 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     signalTags: BeaconTags & { signal: BeaconSignal },
     traceId?: string,
     extra?: Record<string, unknown>,
+    stackBoundary?: CallableFunction,
+    fallbackFramesToDrop = 1,
   ): void => {
-    captureException(new Error(message), {
+    const error = new Error(message);
+    const captureStackTrace = (
+      Error as ErrorConstructor & {
+        captureStackTrace?: (
+          target: object,
+          constructor?: CallableFunction,
+        ) => void;
+      }
+    ).captureStackTrace;
+    if (captureStackTrace !== undefined) {
+      captureStackTrace(error, stackBoundary ?? emitSignal);
+    } else if (error.stack !== undefined) {
+      let remaining = fallbackFramesToDrop;
+      error.stack = error.stack
+        .split("\n")
+        .filter((line) => {
+          const isFrame =
+            /^\s*at\b/u.test(line) || /@.+:\d+:\d+\s*$/u.test(line);
+          if (!isFrame || remaining === 0) return true;
+          remaining -= 1;
+
+          return false;
+        })
+        .join("\n");
+    }
+    captureException(error, {
       level: "warning",
       tags: signalTags,
       ...(traceId !== undefined ? { traceId } : {}),
@@ -1256,7 +1283,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   if (instrument.console !== false && typeof console !== "undefined") {
     for (const method of ["error", "warn"] as const) {
       const original = console[method];
-      console[method] = (...args: unknown[]): void => {
+      const wrappedConsole = (...args: unknown[]): void => {
         addBreadcrumb({
           message: `console.${method}: ${args.map(String).join(" ")}`,
           type: "console",
@@ -1274,11 +1301,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             .trim()
             .slice(0, SIGNAL_TEXT_MAX);
           if (text !== "")
-            emitSignal(text, { signal: BEACON_SIGNAL.CONSOLE_ERROR });
+            emitSignal(
+              text,
+              { signal: BEACON_SIGNAL.CONSOLE_ERROR },
+              undefined,
+              undefined,
+              wrappedConsole,
+              2,
+            );
           inSignalConsole = false;
         }
         original.apply(console, args);
       };
+      console[method] = wrappedConsole;
       cleanups.push(() => {
         console[method] = original;
       });
