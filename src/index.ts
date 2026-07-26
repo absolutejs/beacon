@@ -104,8 +104,7 @@ export type BeaconInstrumentation = {
    * warning, or return false to drop it.
    */
   resourceErrors?:
-    | boolean
-    | ((failure: BeaconResourceFailure) => "error" | "warning" | false);
+    boolean | ((failure: BeaconResourceFailure) => "error" | "warning" | false);
   /** `unhandledrejection` events. Default true. */
   unhandledRejections?: boolean;
   /** Breadcrumb `console.error` / `console.warn`. Default true. */
@@ -189,6 +188,17 @@ export type BeaconOptions = {
   sampleRate?: number;
   /** Mutate or drop (return null) each event before it's buffered. */
   beforeSend?: (event: BeaconEvent) => BeaconEvent | null;
+  /**
+   * Redact credentials, secret-bearing fields, and URL query/hash values after
+   * `beforeSend` and before buffering. Default true. Disable only when an
+   * equivalent trusted boundary owns redaction.
+   */
+  redact?: boolean;
+  /**
+   * Drop signatures known to come from browser hosts/scanners rather than the
+   * page, such as CefSharp's JavaScript bridge rejections. Default true.
+   */
+  filterKnownNoise?: boolean;
   /** Supply the active session-replay id (wired by @absolutejs/replay). */
   getReplayId?: () => string | undefined;
   /** Auto-instrumentation toggles (all default true). */
@@ -443,6 +453,137 @@ const safeStringify = (value: unknown): string => {
     return String(value);
   }
 };
+
+const REDACTED = "[REDACTED]";
+const SENSITIVE_KEY_NAMES = new Set([
+  "accesstoken",
+  "apikey",
+  "authorization",
+  "clientsecret",
+  "cookie",
+  "csrftoken",
+  "idtoken",
+  "password",
+  "passwd",
+  "proxyauthorization",
+  "refreshtoken",
+  "secret",
+  "setcookie",
+  "token",
+]);
+const URL_KEY_NAMES = new Set([
+  "endpoint",
+  "errorfilename",
+  "resourceurl",
+  "url",
+]);
+const normalizeFieldName = (key: string): string =>
+  key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+const isSensitiveField = (key: string): boolean =>
+  SENSITIVE_KEY_NAMES.has(normalizeFieldName(key));
+const isUrlField = (key: string): boolean =>
+  URL_KEY_NAMES.has(normalizeFieldName(key));
+
+const redactUrl = (value: string): string => {
+  try {
+    const absolute = /^[a-z][a-z\d+.-]*:/i.test(value);
+    const url = new URL(value, "https://beacon.invalid");
+    url.search = "";
+    url.hash = "";
+    return absolute ? url.toString() : `${url.pathname}`;
+  } catch {
+    return value.replace(/[?#].*$/, "");
+  }
+};
+
+const redactString = (value: string): string =>
+  value
+    .replace(
+      /\b(Bearer)\s+[A-Za-z0-9._~+/-]+=*/gi,
+      (_match, scheme: string) => `${scheme} ${REDACTED}`,
+    )
+    .replace(
+      /([?&](?:access_token|api_?key|authorization|code|id_token|password|refresh_token|secret|token)=)[^&#\s]*/gi,
+      `$1${REDACTED}`,
+    )
+    .replace(
+      /\b((?:access_?token|api_?key|authorization|client_?secret|cookie|id_?token|password|passwd|refresh_?token|secret|token)\s*[:=]\s*)(?!Bearer\b|\[REDACTED\])[^,\s;]+/gi,
+      `$1${REDACTED}`,
+    )
+    .replace(
+      /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+      REDACTED,
+    );
+
+const redactValue = (
+  value: unknown,
+  key: string | undefined,
+  seen: Set<object>,
+  depth = 0,
+): unknown => {
+  if (key !== undefined && isSensitiveField(key)) return REDACTED;
+  if (typeof value === "string") {
+    return redactString(
+      key !== undefined && isUrlField(key) ? redactUrl(value) : value,
+    );
+  }
+  if (
+    value === null ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (typeof value === "bigint") return String(value);
+  if (typeof value !== "object") return String(value);
+  if (depth >= 12) return "[Truncated]";
+  if (seen.has(value)) return "[Circular]";
+  seen.add(value);
+  const redacted = Array.isArray(value)
+    ? value.map((entry) => redactValue(entry, undefined, seen, depth + 1))
+    : Object.fromEntries(
+        Object.entries(value).map(([field, entry]) => [
+          field,
+          redactValue(entry, field, seen, depth + 1),
+        ]),
+      );
+  seen.delete(value);
+  return redacted;
+};
+
+/** Redact an event without mutating the caller's object. */
+export const redactBeaconEvent = (event: BeaconEvent): BeaconEvent => {
+  const redacted: BeaconEvent = {
+    ...event,
+    message: redactString(event.message),
+  };
+  if (event.stack !== undefined) redacted.stack = redactString(event.stack);
+  if (event.tags !== undefined) {
+    redacted.tags = Object.fromEntries(
+      Object.entries(event.tags).map(([key, value]) => [
+        key,
+        redactValue(value, key, new Set()),
+      ]),
+    ) as BeaconTags;
+  }
+  if (event.extra !== undefined) {
+    redacted.extra = redactValue(event.extra, undefined, new Set()) as Record<
+      string,
+      unknown
+    >;
+  }
+  return redacted;
+};
+
+const CEF_SHARP_REJECTION =
+  /^Object Not Found Matching Id:\d+, MethodName:[A-Za-z_$][\w$]*, ParamCount:\d+$/;
+
+/** Known browser-host/scanner failures that do not originate in page code. */
+export const isKnownBeaconNoise = (
+  event: Pick<BeaconEvent, "message" | "name">,
+): boolean =>
+  event.name === "UnhandledRejection" &&
+  CEF_SHARP_REJECTION.test(event.message);
 
 const errorWithStack = (
   name: string,
@@ -762,6 +903,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const flushIntervalMs = options.flushIntervalMs ?? 5000;
   const maxBreadcrumbs = options.maxBreadcrumbs ?? 30;
   const sampleRate = options.sampleRate ?? 1;
+  const redact = options.redact !== false;
+  const filterKnownNoise = options.filterKnownNoise !== false;
   const transport = options.transport ?? defaultTransport;
   const instrument = options.instrument ?? {};
   const sessionId = newId();
@@ -898,12 +1041,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     if (breadcrumbs.length > 0) extra.breadcrumbs = [...breadcrumbs];
     if (user !== undefined) extra.user = user;
     enriched.extra = extra;
-    return options.beforeSend !== undefined
-      ? options.beforeSend(enriched)
-      : enriched;
+    const customized =
+      options.beforeSend !== undefined
+        ? options.beforeSend(enriched)
+        : enriched;
+    return customized === null || !redact
+      ? customized
+      : redactBeaconEvent(customized);
   };
 
   const push = (event: BeaconEvent): void => {
+    if (filterKnownNoise && isKnownBeaconNoise(event)) return;
     const enriched = enrich(event);
     if (enriched === null) return;
     buffer.push(enriched);
@@ -1268,11 +1416,27 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         captureException(reason, { level: "error" });
         return;
       }
-      const error = new Error(
-        typeof reason === "string" ? reason : safeStringify(reason),
-      );
-      error.name = "UnhandledRejection";
-      captureException(error, { level: "error" });
+      if (
+        typeof reason === "object" &&
+        reason !== null &&
+        typeof (reason as { stack?: unknown }).stack === "string"
+      ) {
+        captureException(reason, { level: "error" });
+        return;
+      }
+      const message =
+        typeof reason === "string" ? reason : safeStringify(reason);
+      captureException(errorWithoutStack("UnhandledRejection", message), {
+        extra: {
+          rejectionType:
+            reason === null
+              ? "null"
+              : Array.isArray(reason)
+                ? "array"
+                : typeof reason,
+        },
+        level: "error",
+      });
     };
     window.addEventListener("unhandledrejection", onRejection);
     cleanups.push(() =>

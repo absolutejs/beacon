@@ -33,13 +33,12 @@ const signalEvent: BeaconEvent = {
 };
 void signalEvent;
 
-const driftedSignalEvent: BeaconEvent = {
-  message: "Network request failed",
-  name: "Error",
-  // @ts-expect-error Signal names are a public contract; drift must fail typecheck.
-  tags: { signal: "failed_request" },
-};
-void driftedSignalEvent;
+type Assert<T extends true> = T;
+type DriftedSignalIsRejected = Assert<
+  "failed_request" extends BeaconSignal ? false : true
+>;
+const driftedSignalIsRejected: DriftedSignalIsRejected = true;
+void driftedSignalIsRejected;
 
 test("beacon envelope is contract-locked to /ingest (compile-time)", () => {
   expect(true).toBe(true);

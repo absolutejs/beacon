@@ -69,8 +69,15 @@ beacon.captureMessage("checkout started", "info");
 - **Context** — `setTags`, `setUser`, per-call `tags`/`extra`, a per-session id.
 - **Cause chains** — preserves nested `Error.cause` stacks and diagnostic fields
   in `extra.errorCauses`, including database driver error codes and details.
-- **Sampling + redaction** — `sampleRate` and a `beforeSend(event)` hook
-  (return `null` to drop).
+- **Sampling + redaction** — `sampleRate`, a `beforeSend(event)` hook
+  (return `null` to drop), and default credential/context redaction after the
+  hook so host customization cannot accidentally reintroduce secrets. URL
+  query/hash values, secret-bearing fields, bearer/JWT values, and breadcrumb
+  text are sanitized. Set `redact: false` only when a trusted boundary replaces
+  it.
+- **Noise filtering** — known browser-host/scanner failures such as CefSharp's
+  `Object Not Found Matching Id` rejection are dropped by default
+  (`filterKnownNoise: false` opts out).
 - **Resource policy** — `instrument.resourceErrors` accepts a predicate so
   expected failures such as optional cross-origin images can become grouped
   warnings while same-origin assets and critical scripts/styles remain errors.

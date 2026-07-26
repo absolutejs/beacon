@@ -37,6 +37,15 @@ export const manifest = defineManifest<BeaconOptions>()({
         title: "Environment",
       }),
     ),
+    filterKnownNoise: Type.Optional(
+      Type.Boolean({
+        default: true,
+        description:
+          "Drop signatures known to originate in browser hosts and scanners rather than application code.",
+        title: "Filter known browser noise",
+        "x-group": "advanced",
+      }),
+    ),
     flushIntervalMs: Type.Optional(
       Type.Integer({
         description:
@@ -92,6 +101,14 @@ export const manifest = defineManifest<BeaconOptions>()({
         description:
           "Capture dead/rage clicks, failed or slow requests, 5xx responses, and console errors.",
         title: "Actionable browser signals",
+      }),
+    ),
+    redact: Type.Optional(
+      Type.Boolean({
+        default: true,
+        description:
+          "Remove credential-bearing fields and URL query/hash values before events are buffered. Keep this on unless an equivalent trusted boundary owns redaction.",
+        title: "Redact sensitive data",
       }),
     ),
     vitals: Type.Optional(

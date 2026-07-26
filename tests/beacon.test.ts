@@ -38,6 +38,12 @@ const make = (
 const tick = (): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, 0));
 
+const dispatchUnhandledRejection = (reason: unknown): void => {
+  const event = new Event("unhandledrejection");
+  Object.defineProperty(event, "reason", { value: reason });
+  window.dispatchEvent(event);
+};
+
 let open: Beacon[] = [];
 const track = (beacon: Beacon): Beacon => {
   open.push(beacon);
@@ -248,6 +254,45 @@ describe("enrichment", () => {
     await beacon.flush();
     expect(sent[0]?.events).toHaveLength(1);
     expect(sent[0]?.events[0]?.message).toBe("public");
+  });
+
+  test("redacts secrets and URL query values after beforeSend", async () => {
+    const { beacon, sent } = make({
+      beforeSend: (event) => ({
+        ...event,
+        extra: {
+          ...event.extra,
+          credentials: {
+            apiKey: "key-live",
+            nested: { password: "hunter2" },
+          },
+        },
+        tags: {
+          ...event.tags,
+          url: "/checkout?code=oauth-code&next=%2Fportal#done",
+        },
+      }),
+    });
+    track(beacon);
+    beacon.addBreadcrumb({
+      message: "request Authorization: Bearer abc.def.ghi",
+      type: "console",
+    });
+    beacon.captureException(new Error("failed token=raw-token"));
+    await beacon.flush();
+
+    const event = sent[0]?.events[0];
+    expect(event?.message).toBe("failed token=[REDACTED]");
+    expect(event?.tags?.url).toBe("/checkout");
+    expect(event?.extra?.credentials).toEqual({
+      apiKey: "[REDACTED]",
+      nested: { password: "[REDACTED]" },
+    });
+    expect(event?.extra?.breadcrumbs).toEqual([
+      expect.objectContaining({
+        message: "request Authorization: Bearer [REDACTED]",
+      }),
+    ]);
   });
 
   test("sampleRate 0 drops everything", async () => {
@@ -595,6 +640,72 @@ describe("auto-instrumentation", () => {
     );
     await beacon.flush();
     expect(sent[0]?.events[0]?.message).toBe("uncaught boom");
+  });
+
+  test("keeps non-Error rejection reasons stackless", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { unhandledRejections: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    dispatchUnhandledRejection("plain rejection");
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]).toMatchObject({
+      extra: expect.objectContaining({ rejectionType: "string" }),
+      message: "plain rejection",
+      name: "UnhandledRejection",
+    });
+    expect(sent[0]?.events[0]).not.toHaveProperty("stack");
+  });
+
+  test("preserves an error-shaped rejection's original stack", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { unhandledRejections: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    dispatchUnhandledRejection({
+      message: "cross-realm rejection",
+      name: "RemoteError",
+      stack: "RemoteError: cross-realm rejection\n    at app.js:12:4",
+    });
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "cross-realm rejection",
+      name: "RemoteError",
+      stack: "RemoteError: cross-realm rejection\n    at app.js:12:4",
+    });
+  });
+
+  test("drops known CefSharp browser-host rejection noise", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { unhandledRejections: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    dispatchUnhandledRejection(
+      "Object Not Found Matching Id:3, MethodName:update, ParamCount:4",
+    );
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
   });
 
   test("preserves browser location when an uncaught error has no Error object", async () => {
