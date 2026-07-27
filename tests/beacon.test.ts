@@ -9,6 +9,8 @@ import {
   type Beacon,
   type BeaconEnvelope,
   type BeaconOptions,
+  type WebVital,
+  type WebVitalsModule,
 } from "../src/index";
 
 const ALL_OFF = {
@@ -203,6 +205,79 @@ describe("capture + transport", () => {
     await tick();
     expect(sent).toHaveLength(1);
     expect(sent[0]?.events).toHaveLength(2);
+  });
+});
+
+describe("Core Web Vitals", () => {
+  test("delivers typed release and replay context through an override transport", async () => {
+    const vitals: WebVital[] = [];
+    const reporters = new Map<
+      string,
+      (metric: {
+        id: string;
+        name: string;
+        navigationType: string;
+        rating: string;
+        value: number;
+      }) => void
+    >();
+    const register =
+      (name: string) =>
+      (
+        report: (metric: {
+          id: string;
+          name: string;
+          navigationType: string;
+          rating: string;
+          value: number;
+        }) => void,
+      ) =>
+        reporters.set(name, report);
+    const webVitals: WebVitalsModule = {
+      onCLS: register("CLS"),
+      onFCP: register("FCP"),
+      onINP: register("INP"),
+      onLCP: register("LCP"),
+      onTTFB: register("TTFB"),
+    };
+    track(
+      createBeacon({
+        environment: "production",
+        getReplayId: () => "replay-1",
+        instrument: ALL_OFF,
+        project: "project-1",
+        release: "release-7",
+        vitals: {
+          transport: (vital) => {
+            vitals.push(vital);
+          },
+          webVitals,
+        },
+      }),
+    );
+
+    reporters.get("LCP")?.({
+      id: "vital-1",
+      name: "LCP",
+      navigationType: "navigate",
+      rating: "poor",
+      value: 4_500,
+    });
+    await tick();
+
+    expect(vitals).toHaveLength(1);
+    expect(vitals[0]).toMatchObject({
+      environment: "production",
+      id: "vital-1",
+      name: "LCP",
+      navigationType: "navigate",
+      project: "project-1",
+      rating: "poor",
+      release: "release-7",
+      replayId: "replay-1",
+      value: 4_500,
+    });
+    expect(vitals[0]?.at).toBeNumber();
   });
 });
 

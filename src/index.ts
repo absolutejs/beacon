@@ -214,6 +214,10 @@ export type BeaconOptions = {
 
 /** A finalized Core Web Vital measurement, tagged with the path it was seen on. */
 export type WebVital = {
+  /** Unix epoch milliseconds when the finalized metric was observed. */
+  at: number;
+  /** Optional deployment environment copied from the Beacon configuration. */
+  environment?: string;
   /** The 5 Core Web Vitals, plus TBT (Total Blocking Time — long-task overage). */
   name: "LCP" | "INP" | "CLS" | "FCP" | "TTFB" | "TBT";
   /** Metric value (ms for LCP/INP/FCP/TTFB; unitless for CLS). */
@@ -224,7 +228,16 @@ export type WebVital = {
   /** Stable per-page-load metric id (dedup). */
   id: string;
   navigationType: string;
+  /** Beacon project identifier, used by authenticated relays for tenant fencing. */
+  project: string;
+  /** Optional application release copied from the Beacon configuration. */
+  release?: string;
+  /** Optional privacy-masked replay correlation. */
+  replayId?: string;
 };
+
+/** Override Web Vital delivery without changing collection semantics. */
+export type BeaconVitalsTransport = (vital: WebVital) => void | Promise<void>;
 
 type WebVitalMetric = {
   name: string;
@@ -256,6 +269,8 @@ export type BeaconVitalsOptions = {
   webVitals?: WebVitalsModule;
   /** Also called for each finalized vital (in addition to the POST). */
   onVital?: (vital: WebVital) => void;
+  /** Override delivery (default: sendBeacon / fetch keepalive). */
+  transport?: BeaconVitalsTransport;
 };
 
 export type Beacon = {
@@ -941,20 +956,34 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const vitalsEndpoint = vitalsOptions.endpoint ?? "/ingest/vitals";
     const reportVital = (metric: WebVitalMetric): void => {
       if (!isVitalName(metric.name)) return;
+      const replayId = options.getReplayId?.();
       const vital: WebVital = {
+        at: Date.now(),
+        ...(options.environment === undefined
+          ? {}
+          : { environment: options.environment }),
         id: metric.id,
         name: metric.name,
         navigationType: metric.navigationType,
         path: location.pathname,
+        project: options.project,
         rating:
           metric.rating === "good" ||
           metric.rating === "needs-improvement" ||
           metric.rating === "poor"
             ? metric.rating
             : "needs-improvement",
+        ...(options.release === undefined ? {} : { release: options.release }),
+        ...(replayId === undefined ? {} : { replayId }),
         value: metric.value,
       };
       vitalsOptions.onVital?.(vital);
+      if (vitalsOptions.transport !== undefined) {
+        void Promise.resolve(vitalsOptions.transport(vital)).catch(() => {
+          // best-effort telemetry
+        });
+        return;
+      }
       const body = JSON.stringify(vital);
       // sendBeacon survives unload (vitals finalize at pagehide); fetch fallback.
       if (typeof navigator.sendBeacon === "function") {
@@ -986,6 +1015,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
     const navigationEntry = performance.getEntriesByType("navigation")[0];
     const navigationType =
+      typeof PerformanceNavigationTiming !== "undefined" &&
       navigationEntry instanceof PerformanceNavigationTiming
         ? navigationEntry.type
         : "navigate";
