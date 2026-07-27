@@ -201,6 +201,8 @@ export type BeaconOptions = {
   filterKnownNoise?: boolean;
   /** Supply the active session-replay id (wired by @absolutejs/replay). */
   getReplayId?: () => string | undefined;
+  /** Supply the active W3C trace id for cross-signal correlation. */
+  getTraceId?: () => string | undefined;
   /** Auto-instrumentation toggles (all default true). */
   instrument?: BeaconInstrumentation;
   /** Auto-capture UX/health signals as warning issues (off by default). `true`
@@ -234,6 +236,14 @@ export type WebVital = {
   release?: string;
   /** Optional privacy-masked replay correlation. */
   replayId?: string;
+  /** Fraction of eligible observations represented by this event. */
+  samplingRate: number;
+  /** Version of this telemetry envelope. */
+  schemaVersion: number;
+  /** Beacon SDK version supplied by the host build. */
+  sdkVersion?: string;
+  /** Optional W3C trace correlation. */
+  traceId?: string;
 };
 
 /** Override Web Vital delivery without changing collection semantics. */
@@ -269,6 +279,12 @@ export type BeaconVitalsOptions = {
   webVitals?: WebVitalsModule;
   /** Also called for each finalized vital (in addition to the POST). */
   onVital?: (vital: WebVital) => void;
+  /** Fraction of eligible page loads sampled. Default 1. */
+  samplingRate?: number;
+  /** Telemetry envelope version. Default 1. */
+  schemaVersion?: number;
+  /** SDK/build version retained with the measurement. */
+  sdkVersion?: string;
   /** Override delivery (default: sendBeacon / fetch keepalive). */
   transport?: BeaconVitalsTransport;
 };
@@ -957,6 +973,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const reportVital = (metric: WebVitalMetric): void => {
       if (!isVitalName(metric.name)) return;
       const replayId = options.getReplayId?.();
+      const traceId = options.getTraceId?.();
       const vital: WebVital = {
         at: Date.now(),
         ...(options.environment === undefined
@@ -975,6 +992,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             : "needs-improvement",
         ...(options.release === undefined ? {} : { release: options.release }),
         ...(replayId === undefined ? {} : { replayId }),
+        samplingRate: vitalsOptions.samplingRate ?? 1,
+        schemaVersion: vitalsOptions.schemaVersion ?? 1,
+        ...(vitalsOptions.sdkVersion === undefined
+          ? {}
+          : { sdkVersion: vitalsOptions.sdkVersion }),
+        ...(traceId === undefined ? {} : { traceId }),
         value: metric.value,
       };
       vitalsOptions.onVital?.(vital);

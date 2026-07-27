@@ -244,10 +244,14 @@ describe("Core Web Vitals", () => {
       createBeacon({
         environment: "production",
         getReplayId: () => "replay-1",
+        getTraceId: () => "11111111111111111111111111111111",
         instrument: ALL_OFF,
         project: "project-1",
         release: "release-7",
         vitals: {
+          samplingRate: 0.5,
+          schemaVersion: 2,
+          sdkVersion: "0.4.1",
           transport: (vital) => {
             vitals.push(vital);
           },
@@ -275,6 +279,10 @@ describe("Core Web Vitals", () => {
       rating: "poor",
       release: "release-7",
       replayId: "replay-1",
+      samplingRate: 0.5,
+      schemaVersion: 2,
+      sdkVersion: "0.4.1",
+      traceId: "11111111111111111111111111111111",
       value: 4_500,
     });
     expect(vitals[0]?.at).toBeNumber();
