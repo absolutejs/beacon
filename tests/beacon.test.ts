@@ -1169,6 +1169,40 @@ describe("auto-instrumentation", () => {
     globalThis.fetch = originalFetch;
   });
 
+  test("suppresses generic transport failures during page teardown", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { failedRequests: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    // A failure already queued when navigation starts must be discarded.
+    await fetch("/v1/invoices").catch(() => undefined);
+    window.dispatchEvent(new Event("pagehide"));
+    // A browser rejection delivered after pagehide must also stay a breadcrumb.
+    await fetch("/v1/notifications").catch(() => undefined);
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+
+    // BFCache restoration makes subsequent genuine failures actionable again.
+    window.dispatchEvent(new Event("pageshow"));
+    await fetch("/v1/invoices").catch(() => undefined);
+    await beacon.flush();
+    expect(sent).toHaveLength(1);
+    globalThis.fetch = originalFetch;
+  });
+
   test("console error signals start their stack at the application caller", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(

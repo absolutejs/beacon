@@ -966,6 +966,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let networkRequestCount = 0;
   let externalNavigationCount = 0;
   let inSignalConsole = false;
+  let pageLifecycleEnding = false;
 
   // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
   const vitalsOptions: BeaconVitalsOptions | null =
@@ -1329,7 +1330,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const kind = failureKind(error);
     // Request cancellation is an expected browser/application lifecycle event.
     // It remains a breadcrumb but must not create an issue.
-    if (kind === "aborted") return;
+    if (kind === "aborted" || (kind === "transport" && pageLifecycleEnding))
+      return;
     const properties = errorProperties(error);
     const state = networkState();
     const failure: BeaconNetworkFailure = {
@@ -1810,14 +1812,29 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   (timer as { unref?: () => void }).unref?.();
   cleanups.push(() => clearInterval(timer));
 
-  const onHide = (): void => {
+  const onPageHide = (): void => {
+    pageLifecycleEnding = true;
+    // Browsers do not consistently surface navigation-cancelled fetches as
+    // AbortError. Chromium can reject them with TypeError("Failed to fetch"),
+    // so discard only pending generic transport failures during page teardown.
+    // Offline and timeout failures remain actionable and are still flushed.
+    pendingNetworkFailures.delete("transport");
     void flush(true);
   };
-  window.addEventListener("pagehide", onHide);
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") onHide();
-  });
-  cleanups.push(() => window.removeEventListener("pagehide", onHide));
+  const onPageShow = (): void => {
+    pageLifecycleEnding = false;
+  };
+  const onVisibilityChange = (): void => {
+    if (document.visibilityState === "hidden") void flush(true);
+  };
+  window.addEventListener("pagehide", onPageHide);
+  window.addEventListener("pageshow", onPageShow);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  cleanups.push(
+    () => window.removeEventListener("pagehide", onPageHide),
+    () => window.removeEventListener("pageshow", onPageShow),
+    () => document.removeEventListener("visibilitychange", onVisibilityChange),
+  );
 
   return {
     addBreadcrumb,
