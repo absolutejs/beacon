@@ -339,7 +339,7 @@ describe("enrichment", () => {
     expect(sent[0]?.events[0]?.message).toBe("public");
   });
 
-  test("redacts secrets and URL query values after beforeSend", async () => {
+  test("redacts secrets and every URL query value after beforeSend", async () => {
     const { beacon, sent } = make({
       beforeSend: (event) => ({
         ...event,
@@ -361,11 +361,22 @@ describe("enrichment", () => {
       message: "request Authorization: Bearer abc.def.ghi",
       type: "console",
     });
-    beacon.captureException(new Error("failed token=raw-token"));
+    beacon.addBreadcrumb({
+      message:
+        "navigate /oauth/callback?state=oauth-state-canary&provider_hint=temporary-canary#done",
+      type: "navigation",
+    });
+    beacon.captureException(
+      new Error(
+        "request https://storage.example.test/object?X-Amz-Signature=signed-canary&X-Amz-Credential=temporary-canary failed token=raw-token",
+      ),
+    );
     await beacon.flush();
 
     const event = sent[0]?.events[0];
-    expect(event?.message).toBe("failed token=[REDACTED]");
+    expect(event?.message).toBe(
+      "request https://storage.example.test/object failed token=[REDACTED]",
+    );
     expect(event?.tags?.url).toBe("/checkout");
     expect(event?.extra?.credentials).toEqual({
       apiKey: "[REDACTED]",
@@ -374,6 +385,9 @@ describe("enrichment", () => {
     expect(event?.extra?.breadcrumbs).toEqual([
       expect.objectContaining({
         message: "request Authorization: Bearer [REDACTED]",
+      }),
+      expect.objectContaining({
+        message: "navigate /oauth/callback",
       }),
     ]);
   });

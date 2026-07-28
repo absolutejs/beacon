@@ -527,8 +527,14 @@ const redactUrl = (value: string): string => {
   }
 };
 
+const redactUrlsInText = (value: string): string =>
+  value.replace(
+    /(?:[a-z][a-z\d+.-]*:\/\/|\/)[^\s"'<>]*[?#][^\s"'<>]*/gi,
+    (candidate) => redactUrl(candidate),
+  );
+
 const redactString = (value: string): string =>
-  value
+  redactUrlsInText(value)
     .replace(
       /\b(Bearer)\s+[A-Za-z0-9._~+/-]+=*/gi,
       (_match, scheme: string) => `${scheme} ${REDACTED}`,
