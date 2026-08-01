@@ -1208,12 +1208,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     traceId?: string,
   ): void => {
     if (signals === null) return;
+    const responseEndpoint = shortUrl(url);
+    const responseMethod = method.toUpperCase();
     if (signals.serverErrors !== false && status >= 500) {
       emitSignal(
-        "Server error response (5xx)",
+        `Server error response (5xx) — ${responseMethod} ${responseEndpoint}`,
         {
-          endpoint: shortUrl(url),
-          method,
+          endpoint: responseEndpoint,
+          method: responseMethod,
           signal: BEACON_SIGNAL.HTTP_5XX,
           status: String(status),
         },
@@ -1223,11 +1225,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
     if (signals.slowResponses !== false && durationMs > slowResponseMs) {
       emitSignal(
-        "Slow response",
+        `Slow response — ${responseMethod} ${responseEndpoint}`,
         {
           durationMs: String(durationMs),
-          endpoint: shortUrl(url),
-          method,
+          endpoint: responseEndpoint,
+          method: responseMethod,
           signal: BEACON_SIGNAL.SLOW_RESPONSE,
         },
         traceId,

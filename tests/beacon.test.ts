@@ -991,7 +991,8 @@ describe("auto-instrumentation", () => {
     await beacon.flush();
 
     expect(sent[0]?.events[0]).toMatchObject({
-      message: "Server error response (5xx)",
+      message:
+        "Server error response (5xx) — POST https://example.test/v1/deals",
       tags: {
         endpoint: "https://example.test/v1/deals",
         method: "POST",
@@ -1000,6 +1001,37 @@ describe("auto-instrumentation", () => {
       },
       traceId,
     });
+    globalThis.fetch = originalFetch;
+  });
+
+  test("groups response signals by method and query-free endpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(null, { status: 204 })) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { serverErrors: true, slowResponseMs: -1 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await fetch("/v1/deals?token=secret", { method: "post" });
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Slow response — POST /v1/deals",
+      tags: {
+        endpoint: "/v1/deals",
+        method: "POST",
+        signal: "slow_response",
+      },
+    });
+    expect(sent[0]?.events[0]?.message).not.toContain("secret");
     globalThis.fetch = originalFetch;
   });
 
