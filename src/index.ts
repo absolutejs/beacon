@@ -649,8 +649,14 @@ const errorWithoutStack = (name: string, message: string): Error => {
   const error = new Error(message);
   error.name = name;
   // Resource `error` events expose the failed element but no JavaScript call
-  // stack. Do not misrepresent the synthetic Error header as captured frames.
-  delete error.stack;
+  // stack. Keep an own undefined property instead of deleting it: Firefox can
+  // expose an inherited stack after deletion, which incorrectly fingerprints
+  // the Beacon collector as the resource failure's source.
+  Object.defineProperty(error, "stack", {
+    configurable: true,
+    value: undefined,
+    writable: true,
+  });
   return error;
 };
 

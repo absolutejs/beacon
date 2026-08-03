@@ -900,6 +900,43 @@ describe("auto-instrumentation", () => {
     script.remove();
   });
 
+  test("resource failures stay stackless when the browser exposes an inherited stack", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { globalErrors: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const script = document.createElement("script");
+    script.src = "/missing.js";
+    document.body.append(script);
+    const inheritedStack = Object.getOwnPropertyDescriptor(
+      Error.prototype,
+      "stack",
+    );
+    try {
+      Object.defineProperty(Error.prototype, "stack", {
+        configurable: true,
+        get: () => "ResourceLoadError: synthetic\n    at beacon.js:1:1",
+      });
+      script.dispatchEvent(new Event("error"));
+    } finally {
+      if (inheritedStack === undefined) delete Error.prototype.stack;
+      else Object.defineProperty(Error.prototype, "stack", inheritedStack);
+    }
+    await beacon.flush();
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Failed to load script resource: /missing.js",
+      name: "ResourceLoadError",
+    });
+    expect(sent[0]?.events[0]).not.toHaveProperty("stack");
+    script.remove();
+  });
+
   test("resourceErrors can downgrade and group an expected resource failure", async () => {
     const sent: BeaconEnvelope[] = [];
     const failures: Array<{
