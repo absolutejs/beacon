@@ -620,19 +620,27 @@ const FACEBOOK_IOS_HOST_INJECTION = new Set([
   "Can't find variable: _AutofillCallbackHandler",
   "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')",
 ]);
+const FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE =
+  "Error invoking postMessage: Java object is gone";
+const FACEBOOK_ANDROID_PERFORMANCE_LOGGER =
+  "iabjs://navigation_performance_logger_android";
 
 const browserUserAgent = (): string =>
   typeof navigator === "undefined" ? "" : navigator.userAgent;
 
 /** Known browser-host/scanner failures that do not originate in page code. */
 export const isKnownBeaconNoise = (
-  event: Pick<BeaconEvent, "message" | "name">,
+  event: Pick<BeaconEvent, "message" | "name" | "stack" | "tags">,
   userAgent = browserUserAgent(),
 ): boolean =>
   (event.name === "UnhandledRejection" &&
     CEF_SHARP_REJECTION.test(event.message)) ||
   (FACEBOOK_IOS_IN_APP_BROWSER.test(userAgent) &&
-    FACEBOOK_IOS_HOST_INJECTION.has(event.message));
+    FACEBOOK_IOS_HOST_INJECTION.has(event.message)) ||
+  (event.name === "Error" &&
+    event.message === FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE &&
+    event.tags?.errorFilename === FACEBOOK_ANDROID_PERFORMANCE_LOGGER &&
+    event.stack?.includes(FACEBOOK_ANDROID_PERFORMANCE_LOGGER) === true);
 
 const errorWithStack = (
   name: string,

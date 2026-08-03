@@ -838,6 +838,52 @@ describe("auto-instrumentation", () => {
     ).toBe(false);
   });
 
+  test("identifies Facebook Android's detached injected Java bridge", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Error invoking postMessage: Java object is gone",
+        name: "Error",
+        stack:
+          "Error: Error invoking postMessage: Java object is gone\n" +
+          "    at sendDataToNative (iabjs://navigation_performance_logger_android:1:10025)",
+        tags: {
+          errorFilename: "iabjs://navigation_performance_logger_android",
+        },
+      }),
+    ).toBe(true);
+  });
+
+  test("preserves application errors with the same detached-object message", () => {
+    expect(
+      isKnownBeaconNoise(
+        {
+          message: "Error invoking postMessage: Java object is gone",
+          name: "Error",
+          stack:
+            "Error: Error invoking postMessage: Java object is gone\n" +
+            "    at sendDataToNative (https://onspark.com/app.js:10:2)",
+          tags: { errorFilename: "https://onspark.com/app.js" },
+        },
+        "Mozilla/5.0 [FB_IAB/FB4A;FBAV/572.0.0.38.71;]",
+      ),
+    ).toBe(false);
+  });
+
+  test("preserves other errors from Facebook's Android performance logger", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Application failed",
+        name: "Error",
+        stack:
+          "Error: Application failed\n" +
+          "    at sendDataToNative (iabjs://navigation_performance_logger_android:1:10025)",
+        tags: {
+          errorFilename: "iabjs://navigation_performance_logger_android",
+        },
+      }),
+    ).toBe(false);
+  });
+
   test("preserves browser location when an uncaught error has no Error object", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
