@@ -6,6 +6,7 @@ import {
   BEACON_ATTRIBUTE,
   BEACON_TRACE_HEADER,
   createBeacon,
+  isKnownBeaconNoise,
   type Beacon,
   type BeaconEnvelope,
   type BeaconOptions,
@@ -803,6 +804,38 @@ describe("auto-instrumentation", () => {
     await beacon.flush();
 
     expect(sent).toHaveLength(0);
+  });
+
+  test.each([
+    ["Can't find variable: _AutofillCallbackHandler", "ReferenceError"],
+    [
+      "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+      "Error",
+    ],
+  ])(
+    "identifies confirmed Facebook iOS host injection noise: %s",
+    (message, name) => {
+      const event = { message, name };
+      const facebookIos =
+        "Mozilla/5.0 Mobile/21G93 Safari/604.1 [FBAN/FBIOS;FBAV/570.0.0.54.72;]";
+
+      expect(isKnownBeaconNoise(event, facebookIos)).toBe(true);
+      expect(
+        isKnownBeaconNoise(
+          event,
+          "Mozilla/5.0 Version/17.6 Mobile Safari/604.1",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  test("preserves unrelated errors in Facebook's iOS embedded browser", () => {
+    expect(
+      isKnownBeaconNoise(
+        { message: "Application failed", name: "Error" },
+        "Mozilla/5.0 Mobile/21G93 Safari/604.1 [FBAN/FBIOS;FBAV/570.0.0.54.72;]",
+      ),
+    ).toBe(false);
   });
 
   test("preserves browser location when an uncaught error has no Error object", async () => {

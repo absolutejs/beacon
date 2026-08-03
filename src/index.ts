@@ -615,12 +615,24 @@ export const redactBeaconEvent = (event: BeaconEvent): BeaconEvent => {
 const CEF_SHARP_REJECTION =
   /^Object Not Found Matching Id:\d+, MethodName:[A-Za-z_$][\w$]*, ParamCount:\d+$/;
 
+const FACEBOOK_IOS_IN_APP_BROWSER = /\[FBAN\/(?:FBIOS|MessengerForiOS);/i;
+const FACEBOOK_IOS_HOST_INJECTION = new Set([
+  "Can't find variable: _AutofillCallbackHandler",
+  "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+]);
+
+const browserUserAgent = (): string =>
+  typeof navigator === "undefined" ? "" : navigator.userAgent;
+
 /** Known browser-host/scanner failures that do not originate in page code. */
 export const isKnownBeaconNoise = (
   event: Pick<BeaconEvent, "message" | "name">,
+  userAgent = browserUserAgent(),
 ): boolean =>
-  event.name === "UnhandledRejection" &&
-  CEF_SHARP_REJECTION.test(event.message);
+  (event.name === "UnhandledRejection" &&
+    CEF_SHARP_REJECTION.test(event.message)) ||
+  (FACEBOOK_IOS_IN_APP_BROWSER.test(userAgent) &&
+    FACEBOOK_IOS_HOST_INJECTION.has(event.message));
 
 const errorWithStack = (
   name: string,
