@@ -1237,6 +1237,7 @@ describe("auto-instrumentation", () => {
         endpoints: "/v1/support/list,/v1/notifications",
         failureKind: "transport",
         method: "GET",
+        reportDelayMs: expect.any(String),
         signal: "fetch_failed",
         transport: "fetch",
       },
@@ -1245,6 +1246,62 @@ describe("auto-instrumentation", () => {
       expect.objectContaining({ endpoint: "/v1/support/list" }),
       expect.objectContaining({ endpoint: "/v1/notifications" }),
     ]);
+    globalThis.fetch = originalFetch;
+  });
+
+  test("keeps a suspended hidden-tab transport burst as breadcrumb-only context", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalNow = Date.now;
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
+    let now = 1_000;
+    Date.now = () => now;
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    globalThis.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { failedRequests: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await Promise.allSettled([
+      fetch("/v1/admin/issues"),
+      fetch("/v1/notifications"),
+    ]);
+    now += 60_000;
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+
+    beacon.captureException(new Error("later application failure"));
+    await beacon.flush();
+    expect(sent[0]?.events[0]?.extra?.breadcrumbs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          data: expect.objectContaining({ reportDelayMs: 60_000 }),
+          message: "Suppressed stale background network interruption",
+          type: "fetch",
+        }),
+      ]),
+    );
+
+    Date.now = originalNow;
+    if (visibilityDescriptor === undefined)
+      Reflect.deleteProperty(document, "visibilityState");
+    else
+      Object.defineProperty(document, "visibilityState", visibilityDescriptor);
     globalThis.fetch = originalFetch;
   });
 

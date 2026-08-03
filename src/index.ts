@@ -1265,6 +1265,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
   type NetworkFailureKind = "offline" | "timeout" | "transport";
   const NETWORK_FAILURE_BURST_MS = 100;
+  const SUSPENDED_BACKGROUND_FAILURE_MS = 30_000;
   const pendingNetworkFailures = new Map<
     NetworkFailureKind,
     BeaconNetworkFailure[]
@@ -1313,6 +1314,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const groups = [...pendingNetworkFailures.entries()];
     pendingNetworkFailures.clear();
     for (const [kind, failures] of groups) {
+      const newestFailureAt = Math.max(...failures.map(({ at }) => at));
+      const reportDelayMs = Math.max(0, Date.now() - newestFailureAt);
       const endpoints = [...new Set(failures.map(({ endpoint }) => endpoint))];
       const methods = [...new Set(failures.map(({ method }) => method))];
       const onlineStates = [
@@ -1324,6 +1327,22 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const visibilityStates = [
         ...new Set(failures.map(({ visibilityState }) => visibilityState)),
       ];
+      const suspendedBackgroundTransport =
+        kind === "transport" &&
+        failures.every(({ visibilityState }) => visibilityState === "hidden") &&
+        reportDelayMs >= SUSPENDED_BACKGROUND_FAILURE_MS;
+      if (suspendedBackgroundTransport) {
+        addBreadcrumb({
+          data: {
+            attemptCount: failures.length,
+            endpoints,
+            reportDelayMs,
+          },
+          message: "Suppressed stale background network interruption",
+          type: "fetch",
+        });
+        continue;
+      }
       emitSignal(
         failureMessage(kind, failures, endpoints),
         {
@@ -1333,6 +1352,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           failureKind: kind,
           method: methods.length === 1 ? methods[0]! : "multiple",
           online: onlineStates.length === 1 ? onlineStates[0]! : "mixed",
+          reportDelayMs: String(reportDelayMs),
           signal: BEACON_SIGNAL.FETCH_FAILED,
           transport: transports.length === 1 ? transports[0]! : "multiple",
           visibilityState:
