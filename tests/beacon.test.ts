@@ -535,6 +535,38 @@ describe("auto-instrumentation", () => {
     window.open = originalOpen;
   });
 
+  test("does not report modifier-assisted anchor navigation as a dead click", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = "/room";
+    anchor.addEventListener("click", (event) => event.preventDefault());
+    document.body.append(anchor);
+    for (const modifier of [
+      "altKey",
+      "ctrlKey",
+      "metaKey",
+      "shiftKey",
+    ] as const) {
+      anchor.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, [modifier]: true }),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+    anchor.remove();
+  });
+
   test("recognizes same-millisecond fetches as a click response", async () => {
     const sent: BeaconEnvelope[] = [];
     const originalFetch = window.fetch;

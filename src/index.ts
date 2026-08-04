@@ -766,9 +766,13 @@ const isInvisibleAnchor = (anchor: HTMLAnchorElement): boolean => {
   }
 };
 
+const isModifiedAnchorClick = (event: Event): boolean =>
+  event instanceof MouseEvent &&
+  (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey);
+
 // A control we'd expect to DO something when clicked (else null) — used for
 // dead-click detection.
-const deadClickCandidate = (target: Element): Element | null => {
+const deadClickCandidate = (target: Element, event: Event): Element | null => {
   const control = target.closest<HTMLElement>(
     "button, a[href], [role='button'], input[type='submit'], input[type='button'], [onclick]",
   );
@@ -784,7 +788,10 @@ const deadClickCandidate = (target: Element): Element | null => {
   ) {
     return null;
   }
-  if (control instanceof HTMLAnchorElement && isInvisibleAnchor(control)) {
+  if (
+    control instanceof HTMLAnchorElement &&
+    (isInvisibleAnchor(control) || isModifiedAnchorClick(event))
+  ) {
     return null;
   }
   return control;
@@ -1620,7 +1627,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (!(target instanceof Element)) return;
       addBreadcrumb({ message: describeElement(target), type: "click" });
       if (signals === null) return;
-      const control = deadClickCandidate(target);
+      const control = deadClickCandidate(target, event);
       if (control === null) return;
       const detectRage =
         signals.rageClicks !== false && event instanceof MouseEvent;
