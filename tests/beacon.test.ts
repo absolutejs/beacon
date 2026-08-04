@@ -567,6 +567,82 @@ describe("auto-instrumentation", () => {
     anchor.remove();
   });
 
+  test("allows an SPA router's accepted lazy navigation to settle", async () => {
+    const originalHref = location.href;
+    location.href = "https://app.test/current";
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: {
+          deadClicks: true,
+          navigationResponseMs: 1800,
+          rageClicks: false,
+        },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = "/lazy-route";
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+      window.setTimeout(() => history.pushState(null, "", "/lazy-route"), 1600);
+    });
+    document.body.append(anchor);
+
+    anchor.focus();
+    anchor.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1900));
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+    anchor.remove();
+    await beacon.close();
+    location.href = originalHref;
+  });
+
+  test("still reports an SPA navigation that never settles", async () => {
+    const originalHref = location.href;
+    location.href = "https://app.test/current";
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: {
+          deadClicks: true,
+          navigationResponseMs: 1600,
+          rageClicks: false,
+        },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = "/stalled-route";
+    anchor.addEventListener("click", (event) => event.preventDefault());
+    document.body.append(anchor);
+
+    anchor.focus();
+    anchor.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2200));
+    await beacon.flush();
+
+    expect(sent[0]?.events).toHaveLength(1);
+    expect(sent[0]?.events[0]?.tags?.signal).toBe("dead_click");
+    anchor.remove();
+    await beacon.close();
+    location.href = originalHref;
+  });
+
   test("recognizes same-millisecond fetches as a click response", async () => {
     const sent: BeaconEnvelope[] = [];
     const originalFetch = window.fetch;

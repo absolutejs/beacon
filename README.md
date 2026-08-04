@@ -94,9 +94,12 @@ beacon.captureMessage("checkout started", "info");
   Framework-driven form updates are recognized from live value, checked, and
   selection state even when no DOM attribute mutation occurs. Programmatic
   `window.open` calls and same-tick fetch/XHR requests are also recognized
-  automatically. Controls marked active through `aria-current`, `aria-pressed`,
-  or `aria-selected` are excluded because clicking the already-current state is
-  an intentional no-op; semantic anchors remain preferred for navigation.
+  automatically. When an SPA router accepts a same-origin anchor, Beacon keeps
+  observing for up to `signals.navigationResponseMs` (default 8s), allowing a
+  lazy route chunk to load without hiding a navigation that genuinely stalls.
+  Controls marked active through `aria-current`, `aria-pressed`, or
+  `aria-selected` are excluded because clicking the already-current state is an
+  intentional no-op; semantic anchors remain preferred for navigation.
 - **Actionable network signals** — expected aborts remain breadcrumbs instead of
   issues; offline, timeout, isolated-endpoint, and multi-endpoint connectivity
   failures are classified separately. Concurrent failures become one event with

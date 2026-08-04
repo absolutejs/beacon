@@ -149,6 +149,12 @@ export type BeaconSignals = {
   consoleErrors?: boolean;
   /** Rapid-click count that trips a rage click. Default 3. */
   rageClickCount?: number;
+  /**
+   * Maximum wait for a same-origin link accepted by an SPA router to finish
+   * navigating before it is considered dead. Default 8000ms; never shorter
+   * than the normal 1500ms dead-click window.
+   */
+  navigationResponseMs?: number;
   /** Slow-response threshold (ms). Default 8000. */
   slowResponseMs?: number;
 };
@@ -991,8 +997,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const RAGE_WINDOW_MS = 1000;
   const RAGE_RADIUS_PX = 40;
   const DEAD_CLICK_WINDOW_MS = 1500;
+  const NAVIGATION_RESPONSE_DEFAULT_MS = 8000;
   const SIGNAL_TEXT_MAX = 180;
   const slowResponseMs = signals?.slowResponseMs ?? SLOW_RESPONSE_DEFAULT_MS;
+  const navigationResponseMs = Math.max(
+    DEAD_CLICK_WINDOW_MS,
+    signals?.navigationResponseMs ?? NAVIGATION_RESPONSE_DEFAULT_MS,
+  );
   const rageCount = signals?.rageClickCount ?? RAGE_COUNT_DEFAULT;
   // Exact counters avoid millisecond timestamp ties when a click synchronously
   // starts a request or opens another browsing context.
@@ -1088,6 +1099,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const buffer: BeaconEvent[] = [];
   const breadcrumbs: Breadcrumb[] = [];
   const cleanups: Array<() => void> = [];
+  const pendingClickCleanups = new Set<() => void>();
+  cleanups.push(() => {
+    for (const cleanup of pendingClickCleanups) cleanup();
+    pendingClickCleanups.clear();
+  });
   let flushPendingNetworkFailures = (): void => {};
   let tags: BeaconTags = {};
   let user: { id?: string; email?: string } | undefined;
@@ -1420,6 +1436,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // whether the page responded.
   const observeClickResponse = (
     control: Element,
+    event: Event,
     report: (responded: boolean) => void,
   ): void => {
     const urlBefore = location.href;
@@ -1428,26 +1445,74 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const formBefore = snapshotOwningForm(control);
     const networkRequestsBefore = networkRequestCount;
     const externalNavigationsBefore = externalNavigationCount;
+    let routerAcceptedNavigation = false;
     let mutated = false;
+    let extended = false;
+    let finished = false;
+    let timer: number | undefined;
+    const observeRouterAcceptance = (handledEvent: Event): void => {
+      if (handledEvent !== event) return;
+      routerAcceptedNavigation =
+        control instanceof HTMLAnchorElement && handledEvent.defaultPrevented;
+    };
+    const responded = (): boolean =>
+      mutated ||
+      formStateChanged(formBefore) ||
+      location.href !== urlBefore ||
+      window.scrollY !== scrollBefore ||
+      document.activeElement !== activeBefore ||
+      networkRequestCount !== networkRequestsBefore ||
+      externalNavigationCount !== externalNavigationsBefore;
+    const finish = (didRespond: boolean): void => {
+      if (finished) return;
+      finished = true;
+      observer.disconnect();
+      control.removeEventListener("click", observeRouterAcceptance);
+      if (timer !== undefined) window.clearTimeout(timer);
+      pendingClickCleanups.delete(cancel);
+      report(didRespond);
+    };
+    const cancel = (): void => {
+      if (finished) return;
+      finished = true;
+      observer.disconnect();
+      control.removeEventListener("click", observeRouterAcceptance);
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
     const observer = new MutationObserver(() => {
       mutated = true;
+      if (extended) finish(true);
     });
     observer.observe(document.body, {
       attributes: true,
       childList: true,
       subtree: true,
     });
-    window.setTimeout(() => {
-      observer.disconnect();
-      const responded =
-        mutated ||
-        formStateChanged(formBefore) ||
-        location.href !== urlBefore ||
-        window.scrollY !== scrollBefore ||
-        document.activeElement !== activeBefore ||
-        networkRequestCount !== networkRequestsBefore ||
-        externalNavigationCount !== externalNavigationsBefore;
-      report(responded);
+    pendingClickCleanups.add(cancel);
+    // The document listener runs in capture phase, before an SPA router's
+    // target listener calls preventDefault(). A one-shot target listener added
+    // here runs later in the same dispatch and observes that acceptance without
+    // relying on microtask timing (which differs across DOM implementations).
+    control.addEventListener("click", observeRouterAcceptance, { once: true });
+    timer = window.setTimeout(() => {
+      if (responded()) {
+        finish(true);
+        return;
+      }
+      if (!routerAcceptedNavigation) {
+        finish(false);
+        return;
+      }
+      // Vue Router and similar SPA routers prevent the anchor's native default
+      // before awaiting a lazy route module. That is an acknowledged click,
+      // but it is not proof the route will ever settle: keep observing until
+      // the navigation-specific deadline so genuine stalled routers still
+      // surface without misclassifying an in-flight dynamic import as dead.
+      extended = true;
+      timer = window.setTimeout(
+        () => finish(responded()),
+        navigationResponseMs - DEAD_CLICK_WINDOW_MS,
+      );
     }, DEAD_CLICK_WINDOW_MS);
   };
 
@@ -1636,7 +1701,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const clickedAt = Date.now();
       const x = event instanceof MouseEvent ? event.clientX : 0;
       const y = event instanceof MouseEvent ? event.clientY : 0;
-      observeClickResponse(control, (responded) => {
+      observeClickResponse(control, event, (responded) => {
         if (responded) {
           // A response between repeated clicks breaks the rage sequence.
           unresponsiveClicks = unresponsiveClicks.filter(
