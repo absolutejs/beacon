@@ -622,10 +622,21 @@ const CEF_SHARP_REJECTION =
   /^Object Not Found Matching Id:\d+, MethodName:[A-Za-z_$][\w$]*, ParamCount:\d+$/;
 
 const FACEBOOK_IOS_IN_APP_BROWSER = /\[FBAN\/(?:FBIOS|MessengerForiOS);/i;
+const INSTAGRAM_IOS_IN_APP_BROWSER = /\bInstagram\s+\d+(?:\.\d+){2,}\b/i;
 const FACEBOOK_IOS_HOST_INJECTION = new Set([
   "Can't find variable: _AutofillCallbackHandler",
   "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')",
 ]);
+const META_IOS_WEBKIT_BRIDGE_FAILURE =
+  "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')";
+const isInstagramIosBridgeInjection = (
+  event: Pick<BeaconEvent, "message" | "stack">,
+  userAgent: string,
+) =>
+  INSTAGRAM_IOS_IN_APP_BROWSER.test(userAgent) &&
+  event.message === META_IOS_WEBKIT_BRIDGE_FAILURE &&
+  event.stack?.includes("sendDataToNative") === true &&
+  event.stack.includes("sendPageHideMessage");
 const FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE =
   "Error invoking postMessage: Java object is gone";
 const FACEBOOK_ANDROID_PERFORMANCE_LOGGER =
@@ -643,6 +654,7 @@ export const isKnownBeaconNoise = (
     CEF_SHARP_REJECTION.test(event.message)) ||
   (FACEBOOK_IOS_IN_APP_BROWSER.test(userAgent) &&
     FACEBOOK_IOS_HOST_INJECTION.has(event.message)) ||
+  isInstagramIosBridgeInjection(event, userAgent) ||
   (event.name === "Error" &&
     event.message === FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE &&
     event.tags?.errorFilename === FACEBOOK_ANDROID_PERFORMANCE_LOGGER &&

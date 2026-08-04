@@ -946,6 +946,56 @@ describe("auto-instrumentation", () => {
     ).toBe(false);
   });
 
+  test("identifies Instagram iOS's injected page-hide bridge failure", () => {
+    const event = {
+      message:
+        "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+      name: "TypeError",
+      stack:
+        "sendDataToNative@https://www.example.com/:1:1142\n" +
+        "sendPageHideMessage@https://www.example.com/:1:3712\n" +
+        "@https://www.example.com/:1:5421",
+    };
+    const instagramIos =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 26_5_2 like Mac OS X) " +
+      "AppleWebKit/605.1.15 Mobile/23F84 Instagram 440.0.0.30.81 " +
+      "(iPhone18,1; iOS 26_5_2; en_US; en; scale=3.00; 1206x2622; " +
+      "IABMV/1; 1025609183) Safari/604.1";
+
+    expect(isKnownBeaconNoise(event, instagramIos)).toBe(true);
+    expect(
+      isKnownBeaconNoise(event, "Mozilla/5.0 Mobile/23F84 Safari/604.1"),
+    ).toBe(false);
+  });
+
+  test("preserves application WebKit errors in Instagram's iOS browser", () => {
+    const instagramIos =
+      "Mozilla/5.0 Mobile/23F84 Instagram 440.0.0.30.81 Safari/604.1";
+    const message =
+      "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')";
+
+    expect(
+      isKnownBeaconNoise(
+        {
+          message,
+          name: "TypeError",
+          stack: "submitToNative@https://www.example.com/app.js:42:9",
+        },
+        instagramIos,
+      ),
+    ).toBe(false);
+    expect(
+      isKnownBeaconNoise(
+        {
+          message,
+          name: "TypeError",
+          stack: "sendDataToNative@https://www.example.com/:1:1142",
+        },
+        instagramIos,
+      ),
+    ).toBe(false);
+  });
+
   test("identifies Facebook Android's detached injected Java bridge", () => {
     expect(
       isKnownBeaconNoise({

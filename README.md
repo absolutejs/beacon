@@ -76,7 +76,8 @@ beacon.captureMessage("checkout started", "info");
   text are sanitized. Set `redact: false` only when a trusted boundary replaces
   it.
 - **Noise filtering** — known browser-host/scanner failures such as CefSharp's
-  `Object Not Found Matching Id` rejection are dropped by default
+  `Object Not Found Matching Id` rejection and confirmed Meta in-app-browser
+  native-bridge injection failures are dropped by default
   (`filterKnownNoise: false` opts out).
 - **Resource policy** — `instrument.resourceErrors` accepts a predicate so
   expected failures such as optional cross-origin images can become grouped
