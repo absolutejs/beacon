@@ -2127,3 +2127,82 @@ describe("ambient watchdog signals", () => {
     document.body.style.backgroundColor = "";
   });
 });
+
+describe("overlay awareness", () => {
+  test("does not report occlusion while a fixed scrim owns the page", async () => {
+    Object.defineProperty(document.documentElement, "clientWidth", {
+      configurable: true,
+      value: 1024,
+    });
+    Object.defineProperty(document.documentElement, "clientHeight", {
+      configurable: true,
+      value: 800,
+    });
+    document.body.getBoundingClientRect = () =>
+      ({
+        bottom: 800,
+        height: 800,
+        left: 0,
+        right: 1024,
+        toJSON: () => ({}),
+        top: 0,
+        width: 1024,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: ALL_OFF,
+        project: "web",
+        signals: { layoutOverflowSettleMs: 0 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    button.getBoundingClientRect = () =>
+      ({
+        bottom: 140,
+        height: 40,
+        left: 100,
+        right: 200,
+        toJSON: () => ({}),
+        top: 100,
+        width: 100,
+        x: 100,
+        y: 100,
+      }) as DOMRect;
+    const scrim = document.createElement("div");
+    scrim.style.position = "fixed";
+    scrim.getBoundingClientRect = () =>
+      ({
+        bottom: 800,
+        height: 800,
+        left: 0,
+        right: 1024,
+        toJSON: () => ({}),
+        top: 0,
+        width: 1024,
+        x: 0,
+        y: 0,
+      }) as DOMRect;
+    document.body.append(button, scrim);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => scrim;
+    window.dispatchEvent(new Event("resize"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await beacon.flush();
+    const occlusions = sent.flatMap((envelope) =>
+      envelope.events.filter(
+        (event) => event.tags?.signal === "occluded_control",
+      ),
+    );
+    expect(occlusions).toHaveLength(0);
+    button.remove();
+    scrim.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+});

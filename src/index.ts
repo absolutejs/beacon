@@ -1165,6 +1165,35 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let recordRequestForStorm: ((url: string, method: string) => void) | null =
     null;
 
+  // True while an intentional overlay owns the page — an open dialog, or a
+  // fixed element covering (nearly) the whole viewport, the scrim pattern
+  // drawers and modals use even without dialog ARIA. Watchdogs that would
+  // misread "the page is covered / locked on purpose" as a bug stand down.
+  const OVERLAY_VIEWPORT_COVERAGE_MIN = 0.9;
+  const viewportCoveredByOverlay = (): boolean => {
+    if (typeof document === "undefined") return false;
+    if (document.querySelector('[aria-modal="true"], dialog[open]') !== null) {
+      return true;
+    }
+    if (typeof document.elementFromPoint !== "function") return false;
+    const viewportWidth = document.documentElement.clientWidth;
+    const viewportHeight = document.documentElement.clientHeight;
+    if (viewportWidth === 0 || viewportHeight === 0) return false;
+    let node = document.elementFromPoint(viewportWidth / 2, viewportHeight / 2);
+    while (node !== null) {
+      const style = window.getComputedStyle(node);
+      if (style.position === "fixed") {
+        const rect = node.getBoundingClientRect();
+        const coverage =
+          (rect.width * rect.height) / (viewportWidth * viewportHeight);
+        if (coverage >= OVERLAY_VIEWPORT_COVERAGE_MIN) return true;
+      }
+      node = node.parentElement;
+    }
+
+    return false;
+  };
+
   // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
   const vitalsOptions: BeaconVitalsOptions | null =
     options.vitals === undefined || options.vitals === false
@@ -2096,12 +2125,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
     const scanForOcclusion = (): void => {
       if (typeof document.elementFromPoint !== "function") return;
-      // While a dialog is open, covering the rest of the page is the point.
-      if (
-        document.querySelector('[aria-modal="true"], dialog[open]') !== null
-      ) {
-        return;
-      }
+      // While an overlay owns the page, covering the rest of it is the point.
+      if (viewportCoveredByOverlay()) return;
       const viewportWidth = document.documentElement.clientWidth;
       const viewportHeight = document.documentElement.clientHeight;
       const controls = document.querySelectorAll(
@@ -2424,6 +2449,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           scroller.scrollTop !== first.position;
         jailBurst = [];
         if (moved) return;
+        // An open overlay may lock page scroll on purpose.
+        if (viewportCoveredByOverlay()) return;
         const descriptor = describeElement(scroller);
         if (reportedScrollers.has(descriptor)) return;
         reportedScrollers.add(descriptor);
