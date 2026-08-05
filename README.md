@@ -105,6 +105,15 @@ beacon.captureMessage("checkout started", "info");
   Controls marked active through `aria-current`, `aria-pressed`, or
   `aria-selected` are excluded because clicking the already-current state is an
   intentional no-op; semantic anchors remain preferred for navigation.
+- **Layout-overflow signals** — once layout settles (first load, resize end,
+  SPA navigation), a capped, deduped scan reports elements that visibly break
+  their bounds: in-flow elements crossing the viewport's horizontal edges, a
+  child painting past a non-scrolling parent (the flex-squeeze cutoff), and
+  content cut by `overflow: hidden` without an ellipsis treatment. Issues
+  group per element, kind, and viewport bucket (`xs/sm/md/lg/xl`), with the
+  spill size in tags. Subtrees of scroll containers and absolutely positioned
+  escapees (badges, popovers, drawers) are skipped by design; mark deliberate
+  bleeds with `data-beacon-overflow="allow"`.
 - **Actionable network signals** — expected aborts remain breadcrumbs instead of
   issues; offline, timeout, isolated-endpoint, and multi-endpoint connectivity
   failures are classified separately. Concurrent failures become one event with

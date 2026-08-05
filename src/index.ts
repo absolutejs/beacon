@@ -27,16 +27,20 @@ export const BEACON_SIGNAL = {
   DEAD_CLICK: "dead_click",
   FETCH_FAILED: "fetch_failed",
   HTTP_5XX: "http_5xx",
+  LAYOUT_OVERFLOW: "layout_overflow",
   RAGE_CLICK: "rage_click",
   SLOW_RESPONSE: "slow_response",
 } as const;
 
 export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
 
-/** Stable DOM attributes understood by Beacon's click instrumentation. */
+/** Stable DOM attributes understood by Beacon's instrumentation. */
 export const BEACON_ATTRIBUTE = {
   DEAD_CLICK: "data-beacon-dead-click",
   NAME: "data-beacon-name",
+  /** `="allow"` exempts an element AND its subtree from layout-overflow
+   * detection — for deliberate bleeds (decorative shapes, marquees). */
+  OVERFLOW: "data-beacon-overflow",
 } as const;
 
 /** Response header used to correlate a browser signal with its server request. */
@@ -154,6 +158,20 @@ export type BeaconSignals = {
   failedRequests?: boolean;
   /** `console.error` calls (the app explicitly logged an error). Default true. */
   consoleErrors?: boolean;
+  /**
+   * Elements that visibly break their bounds once layout settles (first load,
+   * resize end, SPA navigation): in-flow elements crossing the viewport's
+   * horizontal edges, children painting past a non-scrolling parent, and
+   * content cut by `overflow: hidden` without an ellipsis treatment. Subtrees
+   * of scroll containers and absolutely positioned escapees (badges,
+   * popovers, drawers) are skipped by design. Default true.
+   */
+  layoutOverflows?: boolean;
+  /** Maximum layout-overflow issues reported per page load. Default 5. */
+  layoutOverflowMaxReports?: number;
+  /** Quiet period after load/resize/navigation before the overflow scan
+   *  runs, letting transitions and lazy content settle. Default 600ms. */
+  layoutOverflowSettleMs?: number;
   /** Rapid-click count that trips a rage click. Default 3. */
   rageClickCount?: number;
   /**
@@ -1024,6 +1042,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const RAGE_RADIUS_PX = 40;
   const DEAD_CLICK_WINDOW_MS = 1500;
   const NAVIGATION_RESPONSE_DEFAULT_MS = 8000;
+  const LAYOUT_OVERFLOW_SETTLE_DEFAULT_MS = 600;
+  const LAYOUT_OVERFLOW_MAX_REPORTS_DEFAULT = 5;
+  const LAYOUT_OVERFLOW_VIEWPORT_TOLERANCE_PX = 2;
+  const LAYOUT_OVERFLOW_CONTAINER_TOLERANCE_PX = 4;
+  const VIEWPORT_BUCKET_SM_PX = 480;
+  const VIEWPORT_BUCKET_MD_PX = 768;
+  const VIEWPORT_BUCKET_LG_PX = 1024;
+  const VIEWPORT_BUCKET_XL_PX = 1440;
   const SIGNAL_TEXT_MAX = 180;
   const slowResponseMs = signals?.slowResponseMs ?? SLOW_RESPONSE_DEFAULT_MS;
   const navigationResponseMs = Math.max(
@@ -1037,6 +1063,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let externalNavigationCount = 0;
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
+  // Set by the layout-overflow watchdog so SPA navigations recorded by the
+  // history instrumentation also schedule a post-settle scan.
+  let overflowScanOnNavigation: (() => void) | null = null;
 
   // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
   const vitalsOptions: BeaconVitalsOptions | null =
@@ -1784,6 +1813,173 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     cleanups.push(() => document.removeEventListener("click", onClick, true));
   }
 
+  // Layout-overflow watchdog: once layout settles (first load, resize end,
+  // SPA navigation), walk the visible DOM for elements that break their
+  // bounds. Three kinds are reported:
+  //   viewport  — an in-flow element crosses the viewport's horizontal edges
+  //               (a control pushed offscreen at an untested width);
+  //   container — an in-flow child paints past its parent's border box while
+  //               the parent neither scrolls nor clips (the flex-squeeze cut);
+  //   clipped   — an element's own content is cut by overflow hidden/clip
+  //               without a text-overflow ellipsis treatment.
+  // Skipped by design: subtrees of scroll containers (scrolling IS the
+  // design, and a hidden/clip ancestor means nothing below can visibly
+  // spill), absolutely/fixed positioned children (badges, popovers, and
+  // drawers legitimately escape their parents), invisible elements, and
+  // anything under `data-beacon-overflow="allow"`. Spill size lives in tags,
+  // never in the message, so occurrences group into one issue per element,
+  // kind, and viewport bucket; reports are deduped and capped per page load.
+  if (
+    signals !== null &&
+    signals.layoutOverflows !== false &&
+    typeof document !== "undefined" &&
+    typeof window.getComputedStyle === "function"
+  ) {
+    const overflowSettleMs =
+      signals.layoutOverflowSettleMs ?? LAYOUT_OVERFLOW_SETTLE_DEFAULT_MS;
+    const overflowMaxReports =
+      signals.layoutOverflowMaxReports ?? LAYOUT_OVERFLOW_MAX_REPORTS_DEFAULT;
+    const seenOverflows = new Set<string>();
+    let overflowReports = 0;
+    let overflowTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const viewportBucket = (): string => {
+      const width = document.documentElement.clientWidth;
+      if (width < VIEWPORT_BUCKET_SM_PX) return "xs";
+      if (width < VIEWPORT_BUCKET_MD_PX) return "sm";
+      if (width < VIEWPORT_BUCKET_LG_PX) return "md";
+      if (width < VIEWPORT_BUCKET_XL_PX) return "lg";
+
+      return "xl";
+    };
+
+    const reportOverflow = (
+      element: Element,
+      kind: "clipped" | "container" | "viewport",
+      detail: string,
+      spillPx: number,
+    ): void => {
+      const bucket = viewportBucket();
+      const key = `${kind}:${describeElement(element)}@${bucket}`;
+      if (seenOverflows.has(key)) return;
+      seenOverflows.add(key);
+      overflowReports += 1;
+      emitSignal(
+        `Layout overflow — ${describeElement(element)} ${detail} — ${shortUrl(location.href)} [${bucket}]`,
+        {
+          overflowKind: kind,
+          signal: BEACON_SIGNAL.LAYOUT_OVERFLOW,
+          spillPx: String(Math.round(spillPx)),
+          target: describeElement(element),
+          viewportBucket: bucket,
+          viewportWidth: String(document.documentElement.clientWidth),
+        },
+      );
+    };
+
+    const scanForOverflow = (): void => {
+      const body = document.body;
+      if (body == null || overflowReports >= overflowMaxReports) return;
+      const viewportRight = document.documentElement.clientWidth;
+
+      const visit = (element: Element, parentRect: DOMRect | null): void => {
+        if (overflowReports >= overflowMaxReports) return;
+        if (element.getAttribute(BEACON_ATTRIBUTE.OVERFLOW) === "allow") return;
+        const style = window.getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden") return;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+        const inFlow =
+          style.position !== "absolute" && style.position !== "fixed";
+
+        if (inFlow) {
+          // Every visited element has only visible-overflow ancestors (the
+          // walk stops at scrollers and clippers), so a rect crossing the
+          // viewport's horizontal edge is genuinely painted offscreen.
+          const viewportSpill = Math.max(
+            rect.right - viewportRight,
+            -rect.left,
+          );
+          if (viewportSpill > LAYOUT_OVERFLOW_VIEWPORT_TOLERANCE_PX) {
+            reportOverflow(
+              element,
+              "viewport",
+              "spills past the viewport edge",
+              viewportSpill,
+            );
+
+            // One issue per subtree — descendants spill by implication.
+            return;
+          }
+          if (parentRect !== null) {
+            const containerSpill = Math.max(
+              rect.right - parentRect.right,
+              parentRect.left - rect.left,
+            );
+            if (containerSpill > LAYOUT_OVERFLOW_CONTAINER_TOLERANCE_PX) {
+              reportOverflow(
+                element,
+                "container",
+                "paints outside its parent",
+                containerSpill,
+              );
+
+              return;
+            }
+          }
+        }
+
+        const overflowX = style.overflowX;
+        if (overflowX === "auto" || overflowX === "scroll") return;
+        if (overflowX === "hidden" || overflowX === "clip") {
+          const clipPx = element.scrollWidth - element.clientWidth;
+          if (
+            clipPx > LAYOUT_OVERFLOW_CONTAINER_TOLERANCE_PX &&
+            style.textOverflow !== "ellipsis"
+          ) {
+            reportOverflow(
+              element,
+              "clipped",
+              "content is cut by overflow hidden",
+              clipPx,
+            );
+          }
+
+          return;
+        }
+
+        for (const child of Array.from(element.children)) {
+          visit(child, rect);
+        }
+      };
+
+      visit(body, null);
+    };
+
+    const scheduleOverflowScan = (): void => {
+      if (overflowTimer !== undefined) clearTimeout(overflowTimer);
+      overflowTimer = setTimeout(() => {
+        overflowTimer = undefined;
+        scanForOverflow();
+      }, overflowSettleMs);
+    };
+
+    if (document.readyState === "complete") {
+      scheduleOverflowScan();
+    } else {
+      const onLoad = (): void => scheduleOverflowScan();
+      window.addEventListener("load", onLoad, { once: true });
+      cleanups.push(() => window.removeEventListener("load", onLoad));
+    }
+    window.addEventListener("resize", scheduleOverflowScan);
+    overflowScanOnNavigation = scheduleOverflowScan;
+    cleanups.push(() => {
+      window.removeEventListener("resize", scheduleOverflowScan);
+      overflowScanOnNavigation = null;
+      if (overflowTimer !== undefined) clearTimeout(overflowTimer);
+    });
+  }
+
   if (instrument.fetch !== false && typeof window.fetch === "function") {
     const originalFetch = window.fetch;
     const wrapped = async (
@@ -1942,11 +2138,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   }
 
   if (instrument.history !== false && typeof history !== "undefined") {
-    const record = (): void =>
+    const record = (): void => {
       addBreadcrumb({
         message: `navigate ${location.pathname}${location.search}`,
         type: "navigation",
       });
+      // The new route's layout deserves the same overflow check as a resize.
+      overflowScanOnNavigation?.();
+    };
     const patch = (key: "pushState" | "replaceState"): (() => void) => {
       const original = history[key].bind(history);
       history[key] = (...args: Parameters<History["pushState"]>) => {

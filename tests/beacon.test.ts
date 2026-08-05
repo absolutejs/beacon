@@ -1691,3 +1691,140 @@ describe("SSR / no-DOM safety", () => {
     expect(mod.getBeacon()).toBeUndefined();
   });
 });
+
+describe("layout-overflow signals", () => {
+  const VIEWPORT_WIDTH = 1024;
+  const domRect = (left: number, right: number): DOMRect =>
+    ({
+      bottom: 50,
+      height: 50,
+      left,
+      right,
+      toJSON: () => ({}),
+      top: 0,
+      width: right - left,
+      x: left,
+      y: 0,
+    }) as DOMRect;
+  const mockRect = (element: Element, rect: DOMRect): void => {
+    element.getBoundingClientRect = () => rect;
+  };
+  const makeOverflowBeacon = (): { beacon: Beacon; sent: BeaconEnvelope[] } => {
+    Object.defineProperty(document.documentElement, "clientWidth", {
+      configurable: true,
+      value: VIEWPORT_WIDTH,
+    });
+    mockRect(document.body, domRect(0, VIEWPORT_WIDTH));
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: ALL_OFF,
+        project: "web",
+        signals: { layoutOverflowSettleMs: 0 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    return { beacon, sent };
+  };
+  const scan = async (beacon: Beacon): Promise<void> => {
+    window.dispatchEvent(new Event("resize"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await beacon.flush();
+  };
+
+  test("reports an in-flow element spilling past the viewport, once", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const wide = document.createElement("div");
+    wide.className = "runaway-toolbar";
+    mockRect(wide, domRect(0, 1300));
+    document.body.append(wide);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(1);
+    const event = sent[0]?.events[0];
+    expect(event?.tags?.signal).toBe("layout_overflow");
+    expect(event?.tags?.overflowKind).toBe("viewport");
+    expect(event?.tags?.spillPx).toBe("276");
+    expect(event?.message).toContain("div.runaway-toolbar");
+    expect(event?.message).not.toContain("276");
+
+    // The same offender at the same breakpoint stays one issue.
+    await scan(beacon);
+    expect(sent).toHaveLength(1);
+    wide.remove();
+  });
+
+  test("honors the data-beacon-overflow allow escape hatch", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const bleed = document.createElement("div");
+    bleed.setAttribute(BEACON_ATTRIBUTE.OVERFLOW, "allow");
+    mockRect(bleed, domRect(0, 1300));
+    document.body.append(bleed);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    bleed.remove();
+  });
+
+  test("reports a child painting past a non-scrolling parent", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const parent = document.createElement("div");
+    mockRect(parent, domRect(0, 500));
+    const squeezed = document.createElement("button");
+    squeezed.className = "sync-button";
+    mockRect(squeezed, domRect(400, 700));
+    parent.append(squeezed);
+    document.body.append(parent);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(1);
+    const event = sent[0]?.events[0];
+    expect(event?.tags?.overflowKind).toBe("container");
+    expect(event?.tags?.spillPx).toBe("200");
+    expect(event?.message).toContain("button.sync-button");
+    parent.remove();
+  });
+
+  test("skips subtrees of intentional scrollers", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const scroller = document.createElement("div");
+    scroller.style.overflowX = "auto";
+    mockRect(scroller, domRect(0, 800));
+    const wideChild = document.createElement("div");
+    mockRect(wideChild, domRect(0, 1400));
+    scroller.append(wideChild);
+    document.body.append(scroller);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    scroller.remove();
+  });
+
+  test("reports clipped content unless an ellipsis treatment owns it", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const clipped = document.createElement("div");
+    clipped.className = "cut-label";
+    clipped.style.overflowX = "hidden";
+    mockRect(clipped, domRect(0, 200));
+    Object.defineProperty(clipped, "scrollWidth", { value: 300 });
+    Object.defineProperty(clipped, "clientWidth", { value: 200 });
+    const truncated = document.createElement("div");
+    truncated.style.overflowX = "hidden";
+    truncated.style.textOverflow = "ellipsis";
+    mockRect(truncated, domRect(0, 200));
+    Object.defineProperty(truncated, "scrollWidth", { value: 300 });
+    Object.defineProperty(truncated, "clientWidth", { value: 200 });
+    document.body.append(clipped, truncated);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(1);
+    const event = sent[0]?.events[0];
+    expect(event?.tags?.overflowKind).toBe("clipped");
+    expect(event?.tags?.spillPx).toBe("100");
+    expect(event?.message).toContain("div.cut-label");
+    clipped.remove();
+    truncated.remove();
+  });
+});
