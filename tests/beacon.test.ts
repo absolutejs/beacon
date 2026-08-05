@@ -54,6 +54,10 @@ const track = (beacon: Beacon): Beacon => {
 };
 afterEach(async () => {
   for (const beacon of open.splice(0, open.length)) await beacon.close();
+  // Every createBeacon in this file is one "page load" to the boot-time
+  // watchdogs — clear their storage so tests don't read as a reload loop.
+  sessionStorage.removeItem("beacon:reload-times");
+  localStorage.removeItem("beacon:release-first-seen");
 });
 
 describe("capture + transport", () => {
@@ -461,7 +465,7 @@ describe("auto-instrumentation", () => {
       level: "warning",
       tags: { signal: "rage_click", target: "button" },
     });
-    expect(sent[0]?.events[0]?.message).toEndWith(" — about:blank — button");
+    expect(sent[0]?.events[0]?.message).toEndWith(" — blank — button");
     button.remove();
   });
 
@@ -844,8 +848,8 @@ describe("auto-instrumentation", () => {
     await beacon.flush();
 
     expect(sent[0]?.events.map(({ message }) => message)).toEqual([
-      "Dead click — control didn't respond — about:blank — button[save-profile]",
-      "Dead click — control didn't respond — about:blank — button[remove-profile]",
+      "Dead click — control didn't respond — blank — button[save-profile]",
+      "Dead click — control didn't respond — blank — button[remove-profile]",
     ]);
     expect(sent[0]?.events.map(({ tags }) => tags?.target)).toEqual([
       "button[save-profile]",
@@ -1293,10 +1297,9 @@ describe("auto-instrumentation", () => {
     await beacon.flush();
 
     expect(sent[0]?.events[0]).toMatchObject({
-      message:
-        "Server error response (5xx) — POST https://example.test/v1/deals",
+      message: "Server error response (5xx) — POST /v1/deals",
       tags: {
-        endpoint: "https://example.test/v1/deals",
+        endpoint: "/v1/deals",
         method: "POST",
         signal: "http_5xx",
         status: "503",
@@ -1826,5 +1829,301 @@ describe("layout-overflow signals", () => {
     expect(event?.message).toContain("div.cut-label");
     clipped.remove();
     truncated.remove();
+  });
+});
+
+describe("ambient watchdog signals", () => {
+  const VIEWPORT_W = 1024;
+  const VIEWPORT_H = 800;
+  const rectOf = (left: number, right: number, top = 0, bottom = 50): DOMRect =>
+    ({
+      bottom,
+      height: bottom - top,
+      left,
+      right,
+      toJSON: () => ({}),
+      top,
+      width: right - left,
+      x: left,
+      y: top,
+    }) as DOMRect;
+  const setRect = (element: Element, rect: DOMRect): void => {
+    element.getBoundingClientRect = () => rect;
+  };
+  const signalsSent = (
+    sent: BeaconEnvelope[],
+    signal: string,
+  ): BeaconEnvelope["events"] =>
+    sent.flatMap((envelope) =>
+      envelope.events.filter((event) => event.tags?.signal === signal),
+    );
+  const makeWatchdogBeacon = (
+    over: Partial<BeaconOptions> = {},
+  ): { beacon: Beacon; sent: BeaconEnvelope[] } => {
+    Object.defineProperty(document.documentElement, "clientWidth", {
+      configurable: true,
+      value: VIEWPORT_W,
+    });
+    Object.defineProperty(document.documentElement, "clientHeight", {
+      configurable: true,
+      value: VIEWPORT_H,
+    });
+    setRect(document.body, rectOf(0, VIEWPORT_W, 0, VIEWPORT_H));
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: ALL_OFF,
+        project: "web",
+        signals: { layoutOverflowSettleMs: 0 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+        ...over,
+      }),
+    );
+    return { beacon, sent };
+  };
+  const settle = async (beacon: Beacon): Promise<void> => {
+    window.dispatchEvent(new Event("resize"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await beacon.flush();
+  };
+
+  test("reports a scroll jail when scrollable content never moves", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    Object.defineProperty(scrolling, "scrollHeight", {
+      configurable: true,
+      value: 3000,
+    });
+    Object.defineProperty(scrolling, "clientHeight", {
+      configurable: true,
+      value: VIEWPORT_H,
+    });
+    Object.defineProperty(scrolling, "scrollTop", {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    for (let index = 0; index < 8; index += 1) {
+      const wheel = new Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "deltaY", { value: 100 });
+      Object.defineProperty(wheel, "ctrlKey", { value: false });
+      document.body.dispatchEvent(wheel);
+    }
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
+  });
+
+  test("reports focus dropped to body when a dialog unmounts", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const closeButton = document.createElement("button");
+    dialog.append(closeButton);
+    document.body.append(dialog);
+    closeButton.focus();
+    dialog.remove();
+    document.dispatchEvent(new Event("focusout"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await beacon.flush();
+    expect(signalsSent(sent, "focus_lost")).toHaveLength(1);
+  });
+
+  test("reports identical resubmits as form frustration", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const form = document.createElement("form");
+    const field = document.createElement("input");
+    field.name = "email";
+    field.value = "same@value.test";
+    form.append(field);
+    document.body.append(form);
+    for (let index = 0; index < 3; index += 1) {
+      form.dispatchEvent(new Event("submit", { bubbles: true }));
+    }
+    await beacon.flush();
+    expect(signalsSent(sent, "form_frustration")).toHaveLength(1);
+    form.remove();
+  });
+
+  test("reports an open but silent EventSource as stalled", async () => {
+    class FakeEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readyState = 1;
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+    }
+    const original = window.EventSource;
+    window.EventSource = FakeEventSource as unknown as typeof EventSource;
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stalledStreamMs: 40 },
+    });
+    const source = new window.EventSource("https://app.test/stream/updates");
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    await beacon.flush();
+    const events = signalsSent(sent, "stalled_stream");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.endpoint).toBe("/stream/updates");
+    source.close();
+    await beacon.close();
+    window.EventSource = original;
+  });
+
+  test("reports websocket connect/close churn as flapping", async () => {
+    class FakeWebSocket extends EventTarget {
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {
+        this.dispatchEvent(new Event("close"));
+      }
+    }
+    const original = window.WebSocket;
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const { beacon, sent } = makeWatchdogBeacon();
+    for (let index = 0; index < 4; index += 1) {
+      const socket = new window.WebSocket("wss://app.test/sync/ws");
+      (socket as unknown as FakeWebSocket).close();
+    }
+    await beacon.flush();
+    const events = signalsSent(sent, "socket_flapping");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.endpoint).toBe("/sync/ws");
+    await beacon.close();
+    window.WebSocket = original;
+  });
+
+  test("reports one endpoint hammered inside the window as a storm", async () => {
+    const originalFetch = window.fetch;
+    window.fetch = (async () =>
+      new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const { beacon, sent } = makeWatchdogBeacon({
+      instrument: { ...ALL_OFF, fetch: true },
+      signals: { layoutOverflowSettleMs: 0, requestStormCount: 5 },
+    });
+    await Promise.all(
+      Array.from({ length: 5 }, () => window.fetch("/api/matches")),
+    );
+    await beacon.flush();
+    const events = signalsSent(sent, "request_storm");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.endpoint).toBe("/api/matches");
+    await beacon.close();
+    window.fetch = originalFetch;
+  });
+
+  test("reports rapid repeated page loads as a reload loop", async () => {
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-times",
+      JSON.stringify([now - 3000, now - 2000, now - 1000]),
+    );
+    const { beacon, sent } = makeWatchdogBeacon();
+    await beacon.flush();
+    const events = signalsSent(sent, "reload_loop");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.loadCount).toBe("4");
+    sessionStorage.removeItem("beacon:reload-times");
+  });
+
+  test("reports running a build older than one already seen", async () => {
+    const now = Date.now();
+    localStorage.setItem(
+      "beacon:release-first-seen",
+      JSON.stringify({ v1: now - 1800000, v2: now - 1200000 }),
+    );
+    const { beacon, sent } = makeWatchdogBeacon({ release: "v1" });
+    await beacon.flush();
+    const events = signalsSent(sent, "stale_release");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.newestRelease).toBe("v2");
+    localStorage.removeItem("beacon:release-first-seen");
+  });
+
+  test("reports font faces that failed to load", async () => {
+    const fakeFonts = {
+      addEventListener: () => undefined,
+      forEach: (
+        callback: (face: { family: string; status: string }) => void,
+      ) => {
+        callback({ family: "Material Icons", status: "error" });
+      },
+      ready: Promise.resolve(),
+      removeEventListener: () => undefined,
+    };
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: fakeFonts,
+    });
+    const { beacon, sent } = makeWatchdogBeacon();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    const events = signalsSent(sent, "font_failure");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.fontFamily).toBe("Material Icons");
+    await beacon.close();
+    Reflect.deleteProperty(document, "fonts");
+  });
+
+  test("reports a loading indicator that never resolves", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 40 },
+    });
+    const spinner = document.createElement("div");
+    spinner.setAttribute("aria-busy", "true");
+    setRect(spinner, rectOf(0, 40, 0, 40));
+    document.body.append(spinner);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await settle(beacon);
+    const events = signalsSent(sent, "stuck_loading");
+    expect(events).toHaveLength(1);
+    spinner.remove();
+  });
+
+  test("reports a control fully covered by an unrelated element", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const button = document.createElement("button");
+    button.className = "buy-now";
+    setRect(button, rectOf(100, 200, 100, 140));
+    const scrim = document.createElement("div");
+    scrim.className = "leaked-scrim";
+    setRect(scrim, rectOf(0, VIEWPORT_W, 0, VIEWPORT_H));
+    document.body.append(button, scrim);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => scrim;
+    await settle(beacon);
+    const events = signalsSent(sent, "occluded_control");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.coveredBy).toBe("div.leaked-scrim");
+    button.remove();
+    scrim.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
+  test("reports text rendered the same color as its background", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    document.body.style.backgroundColor = "rgb(20, 20, 20)";
+    const heading = document.createElement("h1");
+    heading.textContent = "Invisible headline";
+    heading.style.color = "rgb(20, 20, 20)";
+    setRect(heading, rectOf(0, 400, 0, 40));
+    document.body.append(heading);
+    await settle(beacon);
+    const events = signalsSent(sent, "invisible_text");
+    expect(events).toHaveLength(1);
+    heading.remove();
+    document.body.style.backgroundColor = "";
   });
 });

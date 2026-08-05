@@ -114,6 +114,19 @@ beacon.captureMessage("checkout started", "info");
   spill size in tags. Subtrees of scroll containers and absolutely positioned
   escapees (badges, popovers, drawers) are skipped by design; mark deliberate
   bleeds with `data-beacon-overflow="allow"`.
+- **Ambient watchdogs** — silent failures users abandon instead of reporting
+  become warning issues: scroll jail (a leaked modal scroll lock), stuck
+  loading (`aria-busy`/`role="progressbar"` that never resolves), occluded
+  controls (leaked scrims/z-index bugs, skipped while a dialog is open),
+  invisible text (fg composites to its background — theme-token bugs),
+  stalled `EventSource` streams, WebSocket connect/close flapping, request
+  storms (one endpoint hammered in seconds), reload loops, stale releases (a
+  service worker serving a build older than one this browser already ran),
+  font-face load failures, focus dropped to `<body>` when a dialog unmounts,
+  and form frustration (identical resubmits / repeated native-validation
+  failures). Each is individually toggleable on `signals`, deduped, capped,
+  and exempts `data-beacon-scan="allow"` subtrees where a DOM scan is
+  involved.
 - **Actionable network signals** — expected aborts remain breadcrumbs instead of
   issues; offline, timeout, isolated-endpoint, and multi-endpoint connectivity
   failures are classified separately. Concurrent failures become one event with

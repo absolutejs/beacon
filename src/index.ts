@@ -26,10 +26,22 @@ export const BEACON_SIGNAL = {
   CONSOLE_ERROR: "console_error",
   DEAD_CLICK: "dead_click",
   FETCH_FAILED: "fetch_failed",
+  FOCUS_LOST: "focus_lost",
+  FONT_FAILURE: "font_failure",
+  FORM_FRUSTRATION: "form_frustration",
   HTTP_5XX: "http_5xx",
+  INVISIBLE_TEXT: "invisible_text",
   LAYOUT_OVERFLOW: "layout_overflow",
+  OCCLUDED_CONTROL: "occluded_control",
   RAGE_CLICK: "rage_click",
+  RELOAD_LOOP: "reload_loop",
+  REQUEST_STORM: "request_storm",
+  SCROLL_JAIL: "scroll_jail",
   SLOW_RESPONSE: "slow_response",
+  SOCKET_FLAPPING: "socket_flapping",
+  STALE_RELEASE: "stale_release",
+  STALLED_STREAM: "stalled_stream",
+  STUCK_LOADING: "stuck_loading",
 } as const;
 
 export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
@@ -41,6 +53,9 @@ export const BEACON_ATTRIBUTE = {
   /** `="allow"` exempts an element AND its subtree from layout-overflow
    * detection — for deliberate bleeds (decorative shapes, marquees). */
   OVERFLOW: "data-beacon-overflow",
+  /** `="allow"` exempts an element AND its subtree from the visual scan
+   * detectors (occluded controls, invisible text, stuck loading). */
+  SCAN: "data-beacon-scan",
 } as const;
 
 /** Response header used to correlate a browser signal with its server request. */
@@ -158,6 +173,18 @@ export type BeaconSignals = {
   failedRequests?: boolean;
   /** `console.error` calls (the app explicitly logged an error). Default true. */
   consoleErrors?: boolean;
+  /** A focused element inside an open dialog removed from the DOM with focus
+   *  falling to `<body>` — keyboard users stranded. Default true. */
+  focusLoss?: boolean;
+  /** `FontFace` loads that end in `status: "error"` — icon fonts falling back
+   *  to raw ligature text, custom faces silently missing. Default true. */
+  fontFailures?: boolean;
+  /** The same form submitted or failing native validation repeatedly within a
+   *  minute — the quiet sibling of a rage click. Default true. */
+  formFrustration?: boolean;
+  /** Sampled scan for text rendered nearly the same color as its opaque
+   *  background (theme-token bugs). Default true. */
+  invisibleText?: boolean;
   /**
    * Elements that visibly break their bounds once layout settles (first load,
    * resize end, SPA navigation): in-flow elements crossing the viewport's
@@ -169,11 +196,49 @@ export type BeaconSignals = {
   layoutOverflows?: boolean;
   /** Maximum layout-overflow issues reported per page load. Default 5. */
   layoutOverflowMaxReports?: number;
-  /** Quiet period after load/resize/navigation before the overflow scan
-   *  runs, letting transitions and lazy content settle. Default 600ms. */
+  /** Quiet period after load/resize/navigation before the settled visual
+   *  scan runs, letting transitions and lazy content settle. Default 600ms. */
   layoutOverflowSettleMs?: number;
+  /** Sampled `elementFromPoint` check for interactive controls covered by an
+   *  unrelated element (leaked scrims, z-index bugs). Skipped entirely while
+   *  a dialog is open. Default true. */
+  occludedControls?: boolean;
   /** Rapid-click count that trips a rage click. Default 3. */
   rageClickCount?: number;
+  /** Several full page loads within a minute — a crash or reload loop.
+   *  Default true. */
+  reloadLoops?: boolean;
+  /** The same endpoint hit `requestStormCount` times inside
+   *  `requestStormWindowMs` — refetch loops and retry storms. Needs the
+   *  fetch/XHR instrumentation. Default true. */
+  requestStorms?: boolean;
+  /** Requests to one endpoint that trip a storm. Default 15. */
+  requestStormCount?: number;
+  /** Window for the request-storm counter. Default 10000ms. */
+  requestStormWindowMs?: number;
+  /** Repeated wheel/touch input while the scrollable page never moves — a
+   *  scroll lock leaked by a closed modal. Boundary scrolling (already at the
+   *  top/bottom) is exempt. Default true. */
+  scrollJail?: boolean;
+  /** WebSocket connect/close cycles to one URL tripping a flap report.
+   *  Default true. */
+  socketFlapping?: boolean;
+  /** This page's `release` is older than one this browser has already run —
+   *  a service worker or cache serving a stale build. Default true. */
+  staleReleases?: boolean;
+  /** An open `EventSource` on a visible page with no message for
+   *  `stalledStreamMs` — the silent-stream failure. Default true. */
+  stalledStreams?: boolean;
+  /** Quiet period before an open, visible EventSource counts as stalled.
+   *  Default 60000ms. */
+  stalledStreamMs?: number;
+  /** An `aria-busy`/`role="status"`/`role="progressbar"` element still
+   *  visible after `stuckLoadingMs` — a load that silently hung.
+   *  Default true. */
+  stuckLoading?: boolean;
+  /** Age at which a visible loading indicator counts as stuck.
+   *  Default 20000ms. */
+  stuckLoadingMs?: number;
   /**
    * Maximum wait for a same-origin link accepted by an SPA router to finish
    * navigating before it is considered dead. Default 8000ms; never shorter
@@ -797,6 +862,13 @@ const describeElement = (element: Element): string => {
 
 const SHORT_URL_MAX = 80;
 const shortUrl = (url: string): string => {
+  // Absolute URLs parse without a base — important in sandboxed frames,
+  // where location.origin is the string "null" and would poison the base.
+  try {
+    return new URL(url).pathname;
+  } catch {
+    // Relative — resolve against the page below.
+  }
   try {
     return new URL(url, location.origin).pathname;
   } catch {
@@ -1050,6 +1122,29 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const VIEWPORT_BUCKET_MD_PX = 768;
   const VIEWPORT_BUCKET_LG_PX = 1024;
   const VIEWPORT_BUCKET_XL_PX = 1440;
+  const OCCLUSION_SAMPLE_LIMIT = 25;
+  const OCCLUSION_COVERAGE_MIN = 0.9;
+  const INVISIBLE_TEXT_SAMPLE_LIMIT = 40;
+  const INVISIBLE_TEXT_CONTRAST_MAX = 1.2;
+  const STUCK_LOADING_DEFAULT_MS = 20000;
+  const STUCK_LOADING_POLL_MS = 5000;
+  const SCROLL_JAIL_EVENT_COUNT = 8;
+  const SCROLL_JAIL_WINDOW_MS = 2000;
+  const SCROLL_JAIL_BOUNDARY_TOLERANCE_PX = 2;
+  const REQUEST_STORM_DEFAULT_COUNT = 15;
+  const REQUEST_STORM_DEFAULT_WINDOW_MS = 10000;
+  const SOCKET_FLAP_CYCLES = 4;
+  const SOCKET_FLAP_WINDOW_MS = 60000;
+  const STALLED_STREAM_DEFAULT_MS = 60000;
+  const RELOAD_LOOP_COUNT = 4;
+  const RELOAD_LOOP_WINDOW_MS = 60000;
+  const RELOAD_LOOP_STORAGE_KEY = "beacon:reload-times";
+  const STALE_RELEASE_STORAGE_KEY = "beacon:release-first-seen";
+  const STALE_RELEASE_GRACE_MS = 600000;
+  const STALE_RELEASE_HISTORY_LIMIT = 5;
+  const FORM_FRUSTRATION_THRESHOLD = 3;
+  const FORM_FRUSTRATION_WINDOW_MS = 60000;
+  const FORM_INVALID_BURST_GAP_MS = 100;
   const SIGNAL_TEXT_MAX = 180;
   const slowResponseMs = signals?.slowResponseMs ?? SLOW_RESPONSE_DEFAULT_MS;
   const navigationResponseMs = Math.max(
@@ -1063,9 +1158,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let externalNavigationCount = 0;
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
-  // Set by the layout-overflow watchdog so SPA navigations recorded by the
+  // Set by the settled-scan watchdogs so SPA navigations recorded by the
   // history instrumentation also schedule a post-settle scan.
   let overflowScanOnNavigation: (() => void) | null = null;
+  // Set by the request-storm watchdog; called by the fetch/XHR wrappers.
+  let recordRequestForStorm: ((url: string, method: string) => void) | null =
+    null;
 
   // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
   const vitalsOptions: BeaconVitalsOptions | null =
@@ -1813,32 +1911,43 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     cleanups.push(() => document.removeEventListener("click", onClick, true));
   }
 
-  // Layout-overflow watchdog: once layout settles (first load, resize end,
-  // SPA navigation), walk the visible DOM for elements that break their
-  // bounds. Three kinds are reported:
-  //   viewport  — an in-flow element crosses the viewport's horizontal edges
-  //               (a control pushed offscreen at an untested width);
-  //   container — an in-flow child paints past its parent's border box while
-  //               the parent neither scrolls nor clips (the flex-squeeze cut);
-  //   clipped   — an element's own content is cut by overflow hidden/clip
-  //               without a text-overflow ellipsis treatment.
-  // Skipped by design: subtrees of scroll containers (scrolling IS the
-  // design, and a hidden/clip ancestor means nothing below can visibly
-  // spill), absolutely/fixed positioned children (badges, popovers, and
-  // drawers legitimately escape their parents), invisible elements, and
-  // anything under `data-beacon-overflow="allow"`. Spill size lives in tags,
-  // never in the message, so occurrences group into one issue per element,
-  // kind, and viewport bucket; reports are deduped and capped per page load.
+  // ——— Settled-scan watchdogs ———————————————————————————————————————————
+  // Once layout settles (first load, resize end, SPA navigation), one pass
+  // over the visible DOM runs the visual detectors:
+  //   layout overflow — elements that break their bounds. Three kinds:
+  //     viewport  — an in-flow element crosses the viewport's horizontal
+  //                 edges (a control pushed offscreen at an untested width);
+  //     container — an in-flow child paints past its parent's border box
+  //                 while the parent neither scrolls nor clips;
+  //     clipped   — content cut by overflow hidden/clip without ellipsis.
+  //   occluded controls — an interactive control whose center is covered by
+  //     an unrelated element (leaked scrims, z-index bugs). Skipped while a
+  //     dialog is open, because covering the page is then intentional.
+  //   invisible text — sampled headings/controls whose text color composites
+  //     to (nearly) the same color as their opaque background — the classic
+  //     theme-token bug. Gradients/images and translucent stacks are skipped.
+  //   stuck loading — `aria-busy`/`role="progressbar"` indicators still
+  //     visible after `stuckLoadingMs` (checked on a slow poll as well, so a
+  //     spinner that never resolves is caught without any user action).
+  // Shared discipline: spill/measure values live in tags, never in messages,
+  // so occurrences group into one issue per element, kind, and viewport
+  // bucket; reports are deduped and capped per page load; subtrees under
+  // `data-beacon-overflow="allow"` (overflow) or `data-beacon-scan="allow"`
+  // (the rest) are exempt.
   if (
     signals !== null &&
-    signals.layoutOverflows !== false &&
     typeof document !== "undefined" &&
     typeof window.getComputedStyle === "function"
   ) {
+    const detectOverflow = signals.layoutOverflows !== false;
+    const detectOcclusion = signals.occludedControls !== false;
+    const detectInvisibleText = signals.invisibleText !== false;
+    const detectStuckLoading = signals.stuckLoading !== false;
     const overflowSettleMs =
       signals.layoutOverflowSettleMs ?? LAYOUT_OVERFLOW_SETTLE_DEFAULT_MS;
     const overflowMaxReports =
       signals.layoutOverflowMaxReports ?? LAYOUT_OVERFLOW_MAX_REPORTS_DEFAULT;
+    const stuckLoadingMs = signals.stuckLoadingMs ?? STUCK_LOADING_DEFAULT_MS;
     const seenOverflows = new Set<string>();
     let overflowReports = 0;
     let overflowTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1851,6 +1960,35 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (width < VIEWPORT_BUCKET_XL_PX) return "lg";
 
       return "xl";
+    };
+
+    const isScanExempt = (element: Element): boolean =>
+      element.closest(`[${BEACON_ATTRIBUTE.SCAN}="allow"]`) !== null;
+
+    // Shared reporter for the non-overflow scan detectors: same dedupe key
+    // shape and per-load cap discipline as layout overflow.
+    const seenScanIssues = new Set<string>();
+    let scanIssueReports = 0;
+    const SCAN_ISSUE_MAX_REPORTS = 10;
+    const reportScanIssue = (
+      element: Element,
+      signal: BeaconSignal,
+      detail: string,
+      extraTags: Record<string, string>,
+    ): void => {
+      const bucket = viewportBucket();
+      const key = `${signal}:${describeElement(element)}@${bucket}`;
+      if (seenScanIssues.has(key)) return;
+      if (scanIssueReports >= SCAN_ISSUE_MAX_REPORTS) return;
+      seenScanIssues.add(key);
+      scanIssueReports += 1;
+      emitSignal(`${detail} — ${shortUrl(location.href)} [${bucket}]`, {
+        ...extraTags,
+        signal,
+        target: describeElement(element),
+        viewportBucket: bucket,
+        viewportWidth: String(document.documentElement.clientWidth),
+      });
     };
 
     const reportOverflow = (
@@ -1956,11 +2094,246 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       visit(body, null);
     };
 
+    const scanForOcclusion = (): void => {
+      if (typeof document.elementFromPoint !== "function") return;
+      // While a dialog is open, covering the rest of the page is the point.
+      if (
+        document.querySelector('[aria-modal="true"], dialog[open]') !== null
+      ) {
+        return;
+      }
+      const viewportWidth = document.documentElement.clientWidth;
+      const viewportHeight = document.documentElement.clientHeight;
+      const controls = document.querySelectorAll(
+        'a[href], button, input, select, textarea, [role="button"]',
+      );
+      let sampled = 0;
+      for (const control of Array.from(controls)) {
+        if (sampled >= OCCLUSION_SAMPLE_LIMIT) return;
+        if (isScanExempt(control)) continue;
+        const rect = control.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        // Partially offscreen controls are the layout-overflow detector's job.
+        if (
+          rect.left < 0 ||
+          rect.top < 0 ||
+          rect.right > viewportWidth ||
+          rect.bottom > viewportHeight
+        ) {
+          continue;
+        }
+        sampled += 1;
+        const top = document.elementFromPoint(
+          (rect.left + rect.right) / 2,
+          (rect.top + rect.bottom) / 2,
+        );
+        if (
+          top === null ||
+          top === control ||
+          control.contains(top) ||
+          top.contains(control)
+        ) {
+          continue;
+        }
+        const topRect = top.getBoundingClientRect();
+        const overlapX =
+          Math.min(rect.right, topRect.right) -
+          Math.max(rect.left, topRect.left);
+        const overlapY =
+          Math.min(rect.bottom, topRect.bottom) -
+          Math.max(rect.top, topRect.top);
+        const coverage =
+          (Math.max(overlapX, 0) * Math.max(overlapY, 0)) /
+          (rect.width * rect.height);
+        if (coverage < OCCLUSION_COVERAGE_MIN) continue;
+        reportScanIssue(
+          control,
+          BEACON_SIGNAL.OCCLUDED_CONTROL,
+          `Occluded control — ${describeElement(control)} is covered by ${describeElement(top)}`,
+          { coveredBy: describeElement(top) },
+        );
+      }
+    };
+
+    // — invisible text: WCAG relative-luminance math over composited
+    //   backgrounds; anything we cannot be sure about (gradients, images,
+    //   never-opaque stacks, unparsable colors) is skipped, not guessed.
+    const parseColor = (
+      value: string,
+    ): { r: number; g: number; b: number; a: number } | null => {
+      const match =
+        /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[\s,/]+([\d.]+))?\s*\)$/u.exec(
+          value,
+        );
+      if (match === null) return null;
+
+      return {
+        a: match[4] === undefined ? 1 : Number(match[4]),
+        b: Number(match[3]),
+        g: Number(match[2]),
+        r: Number(match[1]),
+      };
+    };
+    const channelLuminance = (channel: number): number => {
+      const scaled = channel / 255;
+
+      return scaled <= 0.03928
+        ? scaled / 12.92
+        : ((scaled + 0.055) / 1.055) ** 2.4;
+    };
+    const relativeLuminance = (color: {
+      r: number;
+      g: number;
+      b: number;
+    }): number =>
+      0.2126 * channelLuminance(color.r) +
+      0.7152 * channelLuminance(color.g) +
+      0.0722 * channelLuminance(color.b);
+    const compositeOver = (
+      top: { r: number; g: number; b: number; a: number },
+      bottom: { r: number; g: number; b: number; a: number },
+    ): { r: number; g: number; b: number; a: number } => {
+      const alpha = top.a + bottom.a * (1 - top.a);
+      if (alpha === 0) return { a: 0, b: 0, g: 0, r: 0 };
+      const blend = (topChannel: number, bottomChannel: number): number =>
+        (topChannel * top.a + bottomChannel * bottom.a * (1 - top.a)) / alpha;
+
+      return {
+        a: alpha,
+        b: blend(top.b, bottom.b),
+        g: blend(top.g, bottom.g),
+        r: blend(top.r, bottom.r),
+      };
+    };
+    const effectiveBackground = (
+      element: Element,
+    ): { r: number; g: number; b: number } | null => {
+      let accumulated: {
+        r: number;
+        g: number;
+        b: number;
+        a: number;
+      } | null = null;
+      let node: Element | null = element;
+      while (node !== null) {
+        const style = window.getComputedStyle(node);
+        if (style.backgroundImage !== "none" && style.backgroundImage !== "") {
+          return null;
+        }
+        const background = parseColor(style.backgroundColor);
+        if (background !== null && background.a > 0) {
+          accumulated =
+            accumulated === null
+              ? background
+              : compositeOver(accumulated, background);
+          if (accumulated.a >= 0.999) return accumulated;
+        }
+        node = node.parentElement;
+      }
+
+      return null;
+    };
+    const scanForInvisibleText = (): void => {
+      const viewportWidth = document.documentElement.clientWidth;
+      const viewportHeight = document.documentElement.clientHeight;
+      const candidates = document.querySelectorAll(
+        'h1, h2, h3, button, a[href], label, [role="button"]',
+      );
+      let sampled = 0;
+      for (const element of Array.from(candidates)) {
+        if (sampled >= INVISIBLE_TEXT_SAMPLE_LIMIT) return;
+        if (isScanExempt(element)) continue;
+        if ((element.textContent ?? "").trim() === "") continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (
+          rect.bottom < 0 ||
+          rect.top > viewportHeight ||
+          rect.right < 0 ||
+          rect.left > viewportWidth
+        ) {
+          continue;
+        }
+        const style = window.getComputedStyle(element);
+        // Transitions legitimately pass through opacity 0.
+        if (Number(style.opacity || "1") < 0.1) continue;
+        const foreground = parseColor(style.color);
+        if (foreground === null) continue;
+        sampled += 1;
+        const background = effectiveBackground(element);
+        if (background === null) continue;
+        const transparentText = foreground.a < 0.05;
+        const contrast = ((): number => {
+          const fgLuminance = relativeLuminance(foreground);
+          const bgLuminance = relativeLuminance(background);
+          const lighter = Math.max(fgLuminance, bgLuminance);
+          const darker = Math.min(fgLuminance, bgLuminance);
+
+          return (lighter + 0.05) / (darker + 0.05);
+        })();
+        if (!transparentText && contrast > INVISIBLE_TEXT_CONTRAST_MAX) {
+          continue;
+        }
+        reportScanIssue(
+          element,
+          BEACON_SIGNAL.INVISIBLE_TEXT,
+          `Invisible text — ${describeElement(element)} renders (nearly) the same color as its background`,
+          {
+            background: `rgb(${Math.round(background.r)},${Math.round(background.g)},${Math.round(background.b)})`,
+            contrast: contrast.toFixed(2),
+            foreground: style.color,
+          },
+        );
+      }
+    };
+
+    // — stuck loading: first-seen timestamps survive across scans; a slow
+    //   poll catches spinners that hang while the user does nothing at all.
+    const loadingFirstSeen = new WeakMap<Element, number>();
+    const reportedStuckLoading = new WeakSet<Element>();
+    const checkStuckLoading = (): void => {
+      if (document.visibilityState === "hidden") return;
+      const indicators = document.querySelectorAll(
+        '[aria-busy="true"], [role="progressbar"]',
+      );
+      const now = Date.now();
+      for (const indicator of Array.from(indicators)) {
+        if (isScanExempt(indicator)) continue;
+        const rect = indicator.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) continue;
+        const firstSeen = loadingFirstSeen.get(indicator);
+        if (firstSeen === undefined) {
+          loadingFirstSeen.set(indicator, now);
+          continue;
+        }
+        if (
+          now - firstSeen < stuckLoadingMs ||
+          reportedStuckLoading.has(indicator)
+        ) {
+          continue;
+        }
+        reportedStuckLoading.add(indicator);
+        reportScanIssue(
+          indicator,
+          BEACON_SIGNAL.STUCK_LOADING,
+          `Stuck loading — ${describeElement(indicator)} never resolved`,
+          { visibleMs: String(now - firstSeen) },
+        );
+      }
+    };
+
+    const runSettledScan = (): void => {
+      if (detectOverflow) scanForOverflow();
+      if (detectOcclusion) scanForOcclusion();
+      if (detectInvisibleText) scanForInvisibleText();
+      if (detectStuckLoading) checkStuckLoading();
+    };
+
     const scheduleOverflowScan = (): void => {
       if (overflowTimer !== undefined) clearTimeout(overflowTimer);
       overflowTimer = setTimeout(() => {
         overflowTimer = undefined;
-        scanForOverflow();
+        runSettledScan();
       }, overflowSettleMs);
     };
 
@@ -1977,6 +2350,521 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       window.removeEventListener("resize", scheduleOverflowScan);
       overflowScanOnNavigation = null;
       if (overflowTimer !== undefined) clearTimeout(overflowTimer);
+    });
+    if (detectStuckLoading) {
+      const stuckTimer = setInterval(checkStuckLoading, STUCK_LOADING_POLL_MS);
+      (stuckTimer as { unref?: () => void }).unref?.();
+      cleanups.push(() => clearInterval(stuckTimer));
+    }
+  }
+
+  // ——— Interaction watchdogs ———————————————————————————————————————————
+  if (signals !== null && typeof document !== "undefined") {
+    // Scroll jail: repeated wheel input over scrollable-but-immobile content
+    // — the scroll lock a closed modal forgot to release. Boundary no-ops
+    // (already at the top/bottom) and app-handled wheels (preventDefault:
+    // carousels, canvas zoom) reset the burst instead of counting.
+    if (signals.scrollJail !== false) {
+      const nearestScrollable = (start: Element | null): Element | null => {
+        let node = start;
+        while (node !== null && node !== document.body) {
+          const style = window.getComputedStyle(node);
+          const overflowY = style.overflowY;
+          if (
+            (overflowY === "auto" || overflowY === "scroll") &&
+            node.scrollHeight > node.clientHeight + 1
+          ) {
+            return node;
+          }
+          node = node.parentElement;
+        }
+
+        return null;
+      };
+      let jailBurst: Array<{ at: number; position: number }> = [];
+      let jailScroller: Element | null = null;
+      const reportedScrollers = new Set<string>();
+      const onWheel = (event: WheelEvent): void => {
+        if (event.ctrlKey || event.defaultPrevented || event.deltaY === 0) {
+          jailBurst = [];
+
+          return;
+        }
+        const target = event.target instanceof Element ? event.target : null;
+        const scroller = nearestScrollable(target) ?? document.scrollingElement;
+        if (!(scroller instanceof Element)) {
+          jailBurst = [];
+
+          return;
+        }
+        const scrollingDown = event.deltaY > 0;
+        const canMove = scrollingDown
+          ? scroller.scrollTop + scroller.clientHeight <
+            scroller.scrollHeight - SCROLL_JAIL_BOUNDARY_TOLERANCE_PX
+          : scroller.scrollTop > SCROLL_JAIL_BOUNDARY_TOLERANCE_PX;
+        if (!canMove) {
+          jailBurst = [];
+
+          return;
+        }
+        const now = Date.now();
+        if (jailScroller !== scroller) {
+          jailScroller = scroller;
+          jailBurst = [];
+        }
+        jailBurst = jailBurst.filter(
+          (entry) => now - entry.at < SCROLL_JAIL_WINDOW_MS,
+        );
+        jailBurst.push({ at: now, position: scroller.scrollTop });
+        if (jailBurst.length < SCROLL_JAIL_EVENT_COUNT) return;
+        const first = jailBurst[0];
+        const moved =
+          first === undefined ||
+          jailBurst.some((entry) => entry.position !== first.position) ||
+          scroller.scrollTop !== first.position;
+        jailBurst = [];
+        if (moved) return;
+        const descriptor = describeElement(scroller);
+        if (reportedScrollers.has(descriptor)) return;
+        reportedScrollers.add(descriptor);
+        emitSignal(
+          `Scroll jail — ${descriptor} has scrollable content but never moves — ${shortUrl(location.href)}`,
+          { signal: BEACON_SIGNAL.SCROLL_JAIL, target: descriptor },
+        );
+      };
+      document.addEventListener("wheel", onWheel, { passive: true });
+      cleanups.push(() => document.removeEventListener("wheel", onWheel));
+    }
+
+    // Focus loss: a dialog unmounts while owning focus and keyboard users
+    // land on <body> with no way to know where they are.
+    if (signals.focusLoss !== false) {
+      const DIALOG_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog';
+      let lastDialogFocus: Element | null = null;
+      const reportedFocusLoss = new Set<string>();
+      const onFocusIn = (event: FocusEvent): void => {
+        const target = event.target;
+        lastDialogFocus =
+          target instanceof Element && target.closest(DIALOG_SELECTOR) !== null
+            ? target
+            : null;
+      };
+      const onFocusOut = (): void => {
+        const candidate = lastDialogFocus;
+        if (candidate === null) return;
+        setTimeout(() => {
+          const active = document.activeElement;
+          const focusDropped = active === null || active === document.body;
+          if (!focusDropped || candidate.isConnected) return;
+          const descriptor = describeElement(candidate);
+          if (reportedFocusLoss.has(descriptor)) return;
+          reportedFocusLoss.add(descriptor);
+          emitSignal(
+            `Focus lost — a dialog closed and dropped keyboard focus on body — ${shortUrl(location.href)}`,
+            { lastFocused: descriptor, signal: BEACON_SIGNAL.FOCUS_LOST },
+          );
+        }, 0);
+      };
+      document.addEventListener("focusin", onFocusIn, true);
+      document.addEventListener("focusout", onFocusOut, true);
+      cleanups.push(() => {
+        document.removeEventListener("focusin", onFocusIn, true);
+        document.removeEventListener("focusout", onFocusOut, true);
+      });
+    }
+
+    // Form frustration: the same form submitted with IDENTICAL values
+    // repeatedly (retrying a thing that keeps not working — chat-style forms
+    // that clear their input never match), or native validation blocking it
+    // over and over.
+    if (signals.formFrustration !== false) {
+      type FormActivity = {
+        identicalSubmits: number[];
+        invalidBursts: number[];
+        lastData: string | null;
+        lastInvalidAt: number;
+      };
+      const formActivity = new WeakMap<HTMLFormElement, FormActivity>();
+      const reportedForms = new WeakSet<HTMLFormElement>();
+      const activityFor = (form: HTMLFormElement): FormActivity => {
+        const existing = formActivity.get(form);
+        if (existing !== undefined) return existing;
+        const created: FormActivity = {
+          identicalSubmits: [],
+          invalidBursts: [],
+          lastData: null,
+          lastInvalidAt: 0,
+        };
+        formActivity.set(form, created);
+
+        return created;
+      };
+      // Values are compared locally and never leave the page.
+      const serializeForm = (form: HTMLFormElement): string | null => {
+        try {
+          return Array.from(new FormData(form).entries())
+            .map(
+              ([key, value]) =>
+                `${key}=${typeof value === "string" ? value : "file"}`,
+            )
+            .join("&");
+        } catch {
+          return null;
+        }
+      };
+      const reportForm = (form: HTMLFormElement, reason: string): void => {
+        if (reportedForms.has(form)) return;
+        reportedForms.add(form);
+        emitSignal(
+          `Form frustration — ${describeElement(form)} ${reason} — ${shortUrl(location.href)}`,
+          {
+            signal: BEACON_SIGNAL.FORM_FRUSTRATION,
+            target: describeElement(form),
+          },
+        );
+      };
+      const onSubmit = (event: Event): void => {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement)) return;
+        const data = serializeForm(form);
+        if (data === null) return;
+        const activity = activityFor(form);
+        const now = Date.now();
+        if (data !== activity.lastData) {
+          activity.lastData = data;
+          activity.identicalSubmits = [now];
+
+          return;
+        }
+        activity.identicalSubmits = activity.identicalSubmits.filter(
+          (at) => now - at < FORM_FRUSTRATION_WINDOW_MS,
+        );
+        activity.identicalSubmits.push(now);
+        if (activity.identicalSubmits.length >= FORM_FRUSTRATION_THRESHOLD) {
+          reportForm(form, "was submitted with identical values repeatedly");
+        }
+      };
+      const onInvalid = (event: Event): void => {
+        const control = event.target;
+        const form =
+          control instanceof HTMLInputElement ||
+          control instanceof HTMLSelectElement ||
+          control instanceof HTMLTextAreaElement
+            ? control.form
+            : null;
+        if (form === null) return;
+        const activity = activityFor(form);
+        const now = Date.now();
+        // One burst per submit attempt — invalid fires once per bad field.
+        if (now - activity.lastInvalidAt < FORM_INVALID_BURST_GAP_MS) {
+          activity.lastInvalidAt = now;
+
+          return;
+        }
+        activity.lastInvalidAt = now;
+        activity.invalidBursts = activity.invalidBursts.filter(
+          (at) => now - at < FORM_FRUSTRATION_WINDOW_MS,
+        );
+        activity.invalidBursts.push(now);
+        if (activity.invalidBursts.length >= FORM_FRUSTRATION_THRESHOLD) {
+          reportForm(form, "keeps failing native validation");
+        }
+      };
+      document.addEventListener("submit", onSubmit, true);
+      document.addEventListener("invalid", onInvalid, true);
+      cleanups.push(() => {
+        document.removeEventListener("submit", onSubmit, true);
+        document.removeEventListener("invalid", onInvalid, true);
+      });
+    }
+  }
+
+  // ——— Stream & connection watchdogs ————————————————————————————————————
+  // Stalled stream: an EventSource that is OPEN on a visible page but has
+  // delivered nothing for `stalledStreamMs`. Named SSE event types bypass
+  // "message", so the activity timer re-arms for every type the app
+  // subscribes to. Comment-only heartbeats are invisible to the EventSource
+  // API — pick a threshold above the real message cadence.
+  if (
+    signals !== null &&
+    signals.stalledStreams !== false &&
+    typeof window.EventSource === "function"
+  ) {
+    const stalledStreamMs =
+      signals.stalledStreamMs ?? STALLED_STREAM_DEFAULT_MS;
+    const OriginalEventSource = window.EventSource;
+    const reportedStreams = new Set<string>();
+    const instrumentSource = (
+      source: EventSource,
+      endpointLabel: string,
+    ): void => {
+      let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      const disarm = (): void => {
+        if (stallTimer !== undefined) clearTimeout(stallTimer);
+      };
+      const check = (): void => {
+        if (source.readyState !== OriginalEventSource.OPEN) return;
+        if (document.visibilityState === "hidden") {
+          arm();
+
+          return;
+        }
+        if (reportedStreams.has(endpointLabel)) return;
+        reportedStreams.add(endpointLabel);
+        emitSignal(
+          `Stalled stream — ${endpointLabel} is open but silent — ${shortUrl(location.href)}`,
+          {
+            endpoint: endpointLabel,
+            quietMs: String(stalledStreamMs),
+            signal: BEACON_SIGNAL.STALLED_STREAM,
+          },
+        );
+      };
+      const arm = (): void => {
+        disarm();
+        stallTimer = setTimeout(check, stalledStreamMs);
+      };
+      const originalAddEventListener = source.addEventListener.bind(source);
+      const armedTypes = new Set<string>(["error", "message", "open"]);
+      source.addEventListener = ((
+        type: string,
+        listener: EventListenerOrEventListenerObject | null,
+        options?: boolean | AddEventListenerOptions,
+      ): void => {
+        if (!armedTypes.has(type)) {
+          armedTypes.add(type);
+          originalAddEventListener(type, arm);
+        }
+        if (listener !== null) {
+          originalAddEventListener(type, listener, options);
+        }
+      }) as typeof source.addEventListener;
+      originalAddEventListener("open", arm);
+      originalAddEventListener("message", arm);
+      originalAddEventListener("error", disarm);
+      const originalClose = source.close.bind(source);
+      source.close = (): void => {
+        disarm();
+        originalClose();
+      };
+      // Arm immediately too — the readyState guard in check() keeps a
+      // still-connecting source from being miscounted as stalled.
+      arm();
+    };
+    const wrappedEventSource = new Proxy(OriginalEventSource, {
+      construct(target, args: unknown[]): object {
+        const source = Reflect.construct(
+          target,
+          args,
+        ) as unknown as EventSource;
+        instrumentSource(source, shortUrl(String(args[0])));
+
+        return source;
+      },
+    });
+    window.EventSource = wrappedEventSource as typeof EventSource;
+    cleanups.push(() => {
+      if (window.EventSource === wrappedEventSource) {
+        window.EventSource = OriginalEventSource;
+      }
+    });
+  }
+
+  // Socket flapping: repeated connect→close cycles to one URL — an auth or
+  // heartbeat bug burning a reconnect loop. Page-teardown closes are exempt.
+  if (
+    signals !== null &&
+    signals.socketFlapping !== false &&
+    typeof window.WebSocket === "function"
+  ) {
+    const OriginalWebSocket = window.WebSocket;
+    const closesByUrl = new Map<string, number[]>();
+    const reportedSockets = new Set<string>();
+    const wrappedWebSocket = new Proxy(OriginalWebSocket, {
+      construct(target, args: unknown[]): object {
+        const socket = Reflect.construct(target, args) as unknown as WebSocket;
+        const label = shortUrl(String(args[0]));
+        socket.addEventListener("close", () => {
+          if (pageLifecycleEnding) return;
+          const now = Date.now();
+          const closes = (closesByUrl.get(label) ?? []).filter(
+            (at) => now - at < SOCKET_FLAP_WINDOW_MS,
+          );
+          closes.push(now);
+          closesByUrl.set(label, closes);
+          if (
+            closes.length < SOCKET_FLAP_CYCLES ||
+            reportedSockets.has(label)
+          ) {
+            return;
+          }
+          reportedSockets.add(label);
+          emitSignal(
+            `Socket flapping — ${label} keeps connecting and closing — ${shortUrl(location.href)}`,
+            {
+              closeCount: String(closes.length),
+              endpoint: label,
+              signal: BEACON_SIGNAL.SOCKET_FLAPPING,
+              windowMs: String(SOCKET_FLAP_WINDOW_MS),
+            },
+          );
+        });
+
+        return socket;
+      },
+    });
+    window.WebSocket = wrappedWebSocket as typeof WebSocket;
+    cleanups.push(() => {
+      if (window.WebSocket === wrappedWebSocket) {
+        window.WebSocket = OriginalWebSocket;
+      }
+    });
+  }
+
+  // ——— Boot-time watchdogs ——————————————————————————————————————————————
+  // Reload loop: several full page loads inside a minute — a crash loop, a
+  // reload loop, or a user mashing refresh against a broken page.
+  if (
+    signals !== null &&
+    signals.reloadLoops !== false &&
+    typeof sessionStorage !== "undefined"
+  ) {
+    try {
+      const now = Date.now();
+      const raw = sessionStorage.getItem(RELOAD_LOOP_STORAGE_KEY);
+      const parsed: unknown = raw === null ? [] : JSON.parse(raw);
+      const times = (Array.isArray(parsed) ? parsed : []).filter(
+        (at): at is number =>
+          typeof at === "number" && now - at < RELOAD_LOOP_WINDOW_MS,
+      );
+      times.push(now);
+      sessionStorage.setItem(RELOAD_LOOP_STORAGE_KEY, JSON.stringify(times));
+      if (times.length >= RELOAD_LOOP_COUNT) {
+        emitSignal(
+          `Reload loop — repeated page loads within a minute — ${shortUrl(location.href)}`,
+          {
+            loadCount: String(times.length),
+            signal: BEACON_SIGNAL.RELOAD_LOOP,
+          },
+        );
+      }
+    } catch {
+      // Storage unavailable (private mode) — the detector stays off.
+    }
+  }
+
+  // Stale release: this page's build is older than one this browser has
+  // already run — a service worker or CDN cache serving yesterday's app. The
+  // grace window keeps rolling deploys (both releases briefly live) quiet.
+  if (
+    signals !== null &&
+    signals.staleReleases !== false &&
+    typeof localStorage !== "undefined" &&
+    typeof options.release === "string" &&
+    options.release !== ""
+  ) {
+    try {
+      const currentRelease = options.release;
+      const now = Date.now();
+      const raw = localStorage.getItem(STALE_RELEASE_STORAGE_KEY);
+      const parsed: unknown = raw === null ? {} : JSON.parse(raw);
+      const firstSeenByRelease: Record<string, number> = {};
+      if (parsed !== null && typeof parsed === "object") {
+        for (const [release, at] of Object.entries(parsed)) {
+          if (typeof at === "number") firstSeenByRelease[release] = at;
+        }
+      }
+      const currentFirstSeen = firstSeenByRelease[currentRelease] ?? now;
+      firstSeenByRelease[currentRelease] = currentFirstSeen;
+      const newest = Object.entries(firstSeenByRelease)
+        .filter(
+          ([release, at]) =>
+            release !== currentRelease && at > currentFirstSeen,
+        )
+        .sort((left, right) => right[1] - left[1])[0];
+      if (newest !== undefined && now - newest[1] > STALE_RELEASE_GRACE_MS) {
+        emitSignal(
+          `Stale release — this page is running a build older than one this browser already saw — ${shortUrl(location.href)}`,
+          {
+            currentRelease,
+            newestRelease: newest[0],
+            signal: BEACON_SIGNAL.STALE_RELEASE,
+          },
+        );
+      }
+      const trimmed = Object.fromEntries(
+        Object.entries(firstSeenByRelease)
+          .sort((left, right) => right[1] - left[1])
+          .slice(0, STALE_RELEASE_HISTORY_LIMIT),
+      );
+      localStorage.setItem(STALE_RELEASE_STORAGE_KEY, JSON.stringify(trimmed));
+    } catch {
+      // Storage unavailable — skip.
+    }
+  }
+
+  // Font failure: a FontFace that ended in error — icon fonts fall back to
+  // raw ligature words ("chevron_right") and nobody files a report.
+  if (
+    signals !== null &&
+    signals.fontFailures !== false &&
+    typeof document !== "undefined" &&
+    "fonts" in document
+  ) {
+    const reportedFonts = new Set<string>();
+    const sweepFonts = (): void => {
+      document.fonts.forEach((face) => {
+        if (face.status !== "error" || reportedFonts.has(face.family)) return;
+        reportedFonts.add(face.family);
+        emitSignal(
+          `Font failure — ${face.family} failed to load — ${shortUrl(location.href)}`,
+          { fontFamily: face.family, signal: BEACON_SIGNAL.FONT_FAILURE },
+        );
+      });
+    };
+    const fontsReady: Promise<unknown> | undefined = document.fonts.ready;
+    if (fontsReady !== undefined) {
+      void fontsReady.then(sweepFonts).catch(() => undefined);
+    }
+    if (typeof document.fonts.addEventListener === "function") {
+      document.fonts.addEventListener("loadingerror", sweepFonts);
+      cleanups.push(() =>
+        document.fonts.removeEventListener("loadingerror", sweepFonts),
+      );
+    }
+  }
+
+  // Request storm: one endpoint hammered repeatedly inside a short window —
+  // a refetch loop or retry storm. Fed by the fetch/XHR wrappers below.
+  if (signals !== null && signals.requestStorms !== false) {
+    const stormWindowMs =
+      signals.requestStormWindowMs ?? REQUEST_STORM_DEFAULT_WINDOW_MS;
+    const stormCount = signals.requestStormCount ?? REQUEST_STORM_DEFAULT_COUNT;
+    const hitsByEndpoint = new Map<string, number[]>();
+    const reportedStorms = new Set<string>();
+    recordRequestForStorm = (url, method) => {
+      const label = `${method.toUpperCase()} ${shortUrl(url)}`;
+      const now = Date.now();
+      const hits = (hitsByEndpoint.get(label) ?? []).filter(
+        (at) => now - at < stormWindowMs,
+      );
+      hits.push(now);
+      hitsByEndpoint.set(label, hits);
+      if (hits.length < stormCount || reportedStorms.has(label)) return;
+      reportedStorms.add(label);
+      emitSignal(
+        `Request storm — ${label} hit repeatedly within seconds — ${shortUrl(location.href)}`,
+        {
+          endpoint: shortUrl(url),
+          method: method.toUpperCase(),
+          requestCount: String(hits.length),
+          signal: BEACON_SIGNAL.REQUEST_STORM,
+          windowMs: String(stormWindowMs),
+        },
+      );
+    };
+    cleanups.push(() => {
+      recordRequestForStorm = null;
     });
   }
 
@@ -1998,6 +2886,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (url.includes(endpoint)) return originalFetch(...args);
       const start = Date.now();
       networkRequestCount += 1;
+      recordRequestForStorm?.(url, method);
       try {
         const response = await originalFetch(...args);
         addBreadcrumb({
@@ -2058,6 +2947,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (request !== undefined && !request.url.includes(endpoint)) {
         const start = Date.now();
         networkRequestCount += 1;
+        recordRequestForStorm?.(request.url, request.method);
         let outcome: "aborted" | "error" | "timeout" = "error";
         this.addEventListener(
           "abort",
