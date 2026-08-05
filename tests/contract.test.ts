@@ -27,6 +27,7 @@ void _eventContract;
 
 const fetchFailedSignal: BeaconSignal = BEACON_SIGNAL.FETCH_FAILED;
 const signalEvent: BeaconEvent = {
+  groupingKey: "network-connectivity",
   message: "Network request failed",
   name: "Error",
   tags: { signal: fetchFailedSignal },

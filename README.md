@@ -67,6 +67,10 @@ beacon.captureMessage("checkout started", "info");
 - **Batching** — buffers up to `maxBatch` (default 30) / `flushIntervalMs`
   (default 5s); flushes reliably on `pagehide` / tab-hidden via `sendBeacon`.
 - **Context** — `setTags`, `setUser`, per-call `tags`/`extra`, a per-session id.
+- **Stable semantic grouping** — pass `groupingKey` for synthetic or provider
+  failures whose stack or wording can move between releases. The matching
+  `@absolutejs/errors` ingest service validates and hashes it server-side;
+  clients never choose raw fingerprints.
 - **Cause chains** — preserves nested `Error.cause` stacks and diagnostic fields
   in `extra.errorCauses`, including database driver error codes and details.
 - **Sampling + redaction** — `sampleRate`, a `beforeSend(event)` hook
@@ -115,8 +119,8 @@ initBeacon(options)   => Beacon   // also sets the global singleton
 getBeacon()           => Beacon | undefined
 
 // Beacon:
-captureException(error, { level?, traceId?, spanId?, tags?, extra? })
-captureMessage(message, level?)
+captureException(error, { groupingKey?, level?, traceId?, spanId?, tags?, extra? })
+captureMessage(message, level?, { groupingKey?, traceId?, spanId?, tags?, extra? })
 addBreadcrumb({ message, type?, data? })
 setTags(tags) · setUser(user | null)
 flush() => Promise<void>          // buffered events out now
@@ -132,6 +136,9 @@ BEACON_TRACE_HEADER // "x-absolute-trace-id"
 ```
 
 SSR-safe: imported in a non-DOM environment, `createBeacon` returns a no-op.
+
+Semantic grouping keys require `@absolutejs/errors` 0.7.3 or newer at the
+ingest boundary.
 
 ## License
 

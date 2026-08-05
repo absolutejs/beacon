@@ -92,6 +92,16 @@ describe("capture + transport", () => {
     });
   });
 
+  test("captureException sends a semantic grouping key", async () => {
+    const { beacon, sent } = make();
+    track(beacon);
+    beacon.captureException(new Error("provider failed"), {
+      groupingKey: "google-ads-tag-load",
+    });
+    await beacon.flush();
+    expect(sent[0]?.events[0]?.groupingKey).toBe("google-ads-tag-load");
+  });
+
   test("empty flush sends nothing", async () => {
     const { beacon, sent } = make();
     track(beacon);
@@ -108,6 +118,24 @@ describe("capture + transport", () => {
       level: "warning",
       message: "heads up",
       name: "Message",
+    });
+  });
+
+  test("captureMessage accepts grouping and diagnostic context", async () => {
+    const { beacon, sent } = make();
+    track(beacon);
+    beacon.captureMessage("provider failed", "warning", {
+      extra: { attempt: 3 },
+      groupingKey: "google-ads-tag-load",
+      tags: { provider: "google" },
+      traceId: "0123456789abcdef0123456789abcdef",
+    });
+    await beacon.flush();
+    expect(sent[0]?.events[0]).toMatchObject({
+      extra: { attempt: 3 },
+      groupingKey: "google-ads-tag-load",
+      tags: { provider: "google" },
+      traceId: "0123456789abcdef0123456789abcdef",
     });
   });
 

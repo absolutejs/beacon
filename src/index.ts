@@ -57,6 +57,9 @@ export type Breadcrumb = {
 
 /** One captured occurrence — structurally the ingest endpoint's `BeaconEvent`. */
 export type BeaconEvent = {
+  /** Stable semantic issue identity for synthetic/integration failures. The
+   * ingest service hashes this key; raw client fingerprints are never trusted. */
+  groupingKey?: string;
   name: string;
   message: string;
   level?: BeaconLevel;
@@ -79,12 +82,16 @@ export type BeaconEnvelope = {
 };
 
 export type CaptureContext = {
+  /** Override stack/message grouping with a stable semantic issue identity. */
+  groupingKey?: string;
   level?: BeaconLevel;
   traceId?: string;
   spanId?: string;
   tags?: BeaconTags;
   extra?: Record<string, unknown>;
 };
+
+export type CaptureMessageContext = Omit<CaptureContext, "level">;
 
 /** Pluggable wire transport — injectable for tests / custom auth / proxies. */
 export type BeaconTransport = (request: {
@@ -297,7 +304,11 @@ export type BeaconVitalsOptions = {
 
 export type Beacon = {
   captureException: (error: unknown, context?: CaptureContext) => void;
-  captureMessage: (message: string, level?: BeaconLevel) => void;
+  captureMessage: (
+    message: string,
+    level?: BeaconLevel,
+    context?: CaptureMessageContext,
+  ) => void;
   addBreadcrumb: (crumb: {
     message: string;
     type?: Breadcrumb["type"];
@@ -601,6 +612,9 @@ export const redactBeaconEvent = (event: BeaconEvent): BeaconEvent => {
     message: redactString(event.message),
   };
   if (event.stack !== undefined) redacted.stack = redactString(event.stack);
+  if (event.groupingKey !== undefined) {
+    redacted.groupingKey = redactString(event.groupingKey).slice(0, 200);
+  }
   if (event.tags !== undefined) {
     redacted.tags = Object.fromEntries(
       Object.entries(event.tags).map(([key, value]) => [
@@ -1190,6 +1204,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       message: resolved.message,
       name: resolved.name,
     };
+    if (context.groupingKey !== undefined) {
+      event.groupingKey = context.groupingKey;
+    }
     const stack = stackWithCauses(resolved.stack, errorCauses);
     if (stack !== undefined) event.stack = stack;
     if (context.traceId !== undefined) event.traceId = context.traceId;
@@ -1206,8 +1223,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const captureMessage: Beacon["captureMessage"] = (
     message,
     level = "info",
+    context = {},
   ) => {
-    push({ level, message, name: "Message" });
+    const event: BeaconEvent = { level, message, name: "Message" };
+    if (context.groupingKey !== undefined) {
+      event.groupingKey = context.groupingKey;
+    }
+    if (context.traceId !== undefined) event.traceId = context.traceId;
+    if (context.spanId !== undefined) event.spanId = context.spanId;
+    if (context.tags !== undefined) event.tags = context.tags;
+    if (context.extra !== undefined) event.extra = context.extra;
+    push(event);
   };
 
   // A signal is a warning-level capture with a stable message (so the store
@@ -2008,8 +2034,11 @@ export const captureException = (
 ): void => current?.captureException(error, context);
 
 /** Capture a message against the global beacon (no-op if uninitialized). */
-export const captureMessage = (message: string, level?: BeaconLevel): void =>
-  current?.captureMessage(message, level);
+export const captureMessage = (
+  message: string,
+  level?: BeaconLevel,
+  context?: CaptureMessageContext,
+): void => current?.captureMessage(message, level, context);
 
 /** Add a breadcrumb to the global beacon (no-op if uninitialized). */
 export const addBreadcrumb = (crumb: {
