@@ -2245,8 +2245,55 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         r: linearToSrgb(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
       };
     };
-    const parseColor = (value: string): ParsedColor | null =>
-      parseRgbColor(value) ?? parseOklchColor(value);
+    let colorCanvasContext: CanvasRenderingContext2D | null | undefined;
+    const parseBrowserColor = (value: string): ParsedColor | null => {
+      try {
+        if (colorCanvasContext === undefined) {
+          const canvas = document.createElement("canvas");
+          canvas.width = 1;
+          canvas.height = 1;
+          colorCanvasContext = canvas.getContext("2d", {
+            colorSpace: "srgb",
+            willReadFrequently: true,
+          });
+        }
+        const context = colorCanvasContext;
+        if (context === null) return null;
+
+        // Canvas ignores an invalid assignment and retains its previous color.
+        // Seed a value that computed styles will not use, then let the browser
+        // convert every color space it supports into the sRGB pixel WCAG needs.
+        context.fillStyle = "#010203";
+        const sentinel = context.fillStyle;
+        context.fillStyle = value;
+        if (context.fillStyle === sentinel) return null;
+        context.clearRect(0, 0, 1, 1);
+        context.fillRect(0, 0, 1, 1);
+        const pixel = context.getImageData(0, 0, 1, 1).data;
+
+        return {
+          a: (pixel[3] ?? 0) / 255,
+          b: pixel[2] ?? 0,
+          g: pixel[1] ?? 0,
+          r: pixel[0] ?? 0,
+        };
+      } catch {
+        colorCanvasContext = null;
+
+        return null;
+      }
+    };
+    const parseColor = (value: string): ParsedColor | null => {
+      if (value === "" || value === "transparent") {
+        return { a: 0, b: 0, g: 0, r: 0 };
+      }
+
+      return (
+        parseRgbColor(value) ??
+        parseOklchColor(value) ??
+        parseBrowserColor(value)
+      );
+    };
     const channelLuminance = (channel: number): number => {
       const scaled = channel / 255;
 
@@ -2294,7 +2341,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           return null;
         }
         const background = parseColor(style.backgroundColor);
-        if (background !== null && background.a > 0) {
+        if (background === null) return null;
+        if (background.a > 0) {
           accumulated =
             accumulated === null
               ? background

@@ -2160,6 +2160,121 @@ describe("ambient watchdog signals", () => {
       document.body.style.backgroundColor = "";
     }
   });
+
+  test("uses the browser color engine for every preserved CSS Color 4 space", async () => {
+    const formats = [
+      "oklab(0.627 -0.169 0.083)",
+      "lab(50 40 30)",
+      "lch(50 50 40)",
+      "color(srgb 0 0.5 0)",
+      "color(srgb-linear 0 0.5 0)",
+      "color(display-p3 0 0.5 0)",
+      "color(a98-rgb 0 0.5 0)",
+      "color(prophoto-rgb 0 0.5 0)",
+      "color(rec2020 0 0.5 0)",
+      "color(xyz-d50 0.1 0.2 0.1)",
+      "color(xyz-d65 0.1 0.2 0.1)",
+    ];
+    const buttons = formats.map((format) => {
+      const button = document.createElement("button");
+      button.dataset.testBackground = format;
+      button.style.color = "rgb(255, 255, 255)";
+      button.textContent = format;
+      setRect(button, rectOf(0, 200, 0, 40));
+
+      return button;
+    });
+    document.body.style.backgroundColor = "rgb(255, 255, 255)";
+    document.body.append(...buttons);
+    let assignedFillStyle = "";
+    const convertedFormats = new Set<string>();
+    const fakeContext = {
+      clearRect: () => undefined,
+      fillRect: () => undefined,
+      get fillStyle() {
+        return assignedFillStyle;
+      },
+      set fillStyle(value: string | CanvasGradient | CanvasPattern) {
+        assignedFillStyle = String(value);
+        if (assignedFillStyle !== "#010203") {
+          convertedFormats.add(assignedFillStyle);
+        }
+      },
+      getImageData: () => ({
+        data: new Uint8ClampedArray([0, 128, 0, 255]),
+      }),
+    } as unknown as CanvasRenderingContext2D;
+    const originalGetContext = HTMLCanvasElement.prototype.getContext;
+    const originalGetComputedStyle = window.getComputedStyle;
+    HTMLCanvasElement.prototype.getContext = (() =>
+      fakeContext) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    window.getComputedStyle = ((element: Element): CSSStyleDeclaration => {
+      const style = originalGetComputedStyle.call(window, element);
+      const background =
+        element instanceof HTMLElement
+          ? element.dataset.testBackground
+          : undefined;
+      if (background === undefined) return style;
+
+      return new Proxy(style, {
+        get: (target, property) => {
+          if (property === "backgroundColor") return background;
+          const value = Reflect.get(target, property, target) as unknown;
+
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as typeof window.getComputedStyle;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await settle(beacon);
+      expect(signalsSent(sent, "invisible_text")).toHaveLength(0);
+      expect([...convertedFormats]).toEqual(formats);
+      await beacon.close();
+    } finally {
+      HTMLCanvasElement.prototype.getContext = originalGetContext;
+      window.getComputedStyle = originalGetComputedStyle;
+      for (const button of buttons) button.remove();
+      document.body.style.backgroundColor = "";
+    }
+  });
+
+  test("skips contrast checks when an opaque background cannot be parsed", async () => {
+    const button = document.createElement("button");
+    button.textContent = "Future color";
+    button.style.color = "rgb(255, 255, 255)";
+    setRect(button, rectOf(0, 120, 0, 40));
+    document.body.style.backgroundColor = "rgb(255, 255, 255)";
+    document.body.append(button);
+    const originalGetContext = HTMLCanvasElement.prototype.getContext;
+    const originalGetComputedStyle = window.getComputedStyle;
+    HTMLCanvasElement.prototype.getContext = (() =>
+      null) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    window.getComputedStyle = ((element: Element): CSSStyleDeclaration => {
+      const style = originalGetComputedStyle.call(window, element);
+      if (element !== button) return style;
+
+      return new Proxy(style, {
+        get: (target, property) => {
+          if (property === "backgroundColor") return "future-color(0.5 0.2 20)";
+          const value = Reflect.get(target, property, target) as unknown;
+
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as typeof window.getComputedStyle;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await settle(beacon);
+      expect(signalsSent(sent, "invisible_text")).toHaveLength(0);
+      await beacon.close();
+    } finally {
+      HTMLCanvasElement.prototype.getContext = originalGetContext;
+      window.getComputedStyle = originalGetComputedStyle;
+      button.remove();
+      document.body.style.backgroundColor = "";
+    }
+  });
 });
 
 describe("overlay awareness", () => {
