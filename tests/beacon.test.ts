@@ -2713,6 +2713,213 @@ describe("ambient watchdog signals", () => {
       document.body.style.backgroundColor = "";
     }
   });
+
+  test("reports an opposite-polarity surface inside an adaptive theme boundary", async () => {
+    document.documentElement.style.colorScheme = "dark";
+    const boundary = document.createElement("main");
+    boundary.setAttribute(BEACON_ATTRIBUTE.THEME, "adaptive");
+    const card = document.createElement("section");
+    card.className = "payment-card";
+    card.textContent = "Payment complete";
+    card.style.backgroundColor = "rgb(255, 255, 255)";
+    setRect(card, rectOf(0, 300, 0, 100));
+    boundary.append(card);
+    document.body.append(boundary);
+    const { beacon, sent } = makeWatchdogBeacon();
+    await settle(beacon);
+    const events = signalsSent(sent, "theme_mismatch");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      activeTheme: "dark",
+      target: "section.payment-card",
+    });
+    boundary.remove();
+    document.documentElement.style.colorScheme = "";
+  });
+
+  test("allows intentional opposite-theme surfaces", async () => {
+    document.documentElement.style.colorScheme = "dark";
+    const boundary = document.createElement("main");
+    boundary.setAttribute(BEACON_ATTRIBUTE.THEME, "adaptive");
+    const card = document.createElement("section");
+    card.setAttribute(BEACON_ATTRIBUTE.THEME, "allow");
+    card.textContent = "Intentional light preview";
+    card.style.backgroundColor = "rgb(255, 255, 255)";
+    setRect(card, rectOf(0, 300, 0, 100));
+    boundary.append(card);
+    document.body.append(boundary);
+    const { beacon, sent } = makeWatchdogBeacon();
+    await settle(beacon);
+    expect(signalsSent(sent, "theme_mismatch")).toHaveLength(0);
+    boundary.remove();
+    document.documentElement.style.colorScheme = "";
+  });
+
+  test("recognizes explicit loading contracts", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 1 },
+    });
+    const spinner = document.createElement("span");
+    spinner.setAttribute(BEACON_ATTRIBUTE.LOADING, "save-video");
+    setRect(spinner, rectOf(0, 40, 0, 40));
+    document.body.append(spinner);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await settle(beacon);
+    expect(signalsSent(sent, "stuck_loading")).toHaveLength(1);
+    spinner.remove();
+  });
+
+  test("reports a marked iframe that never loads", async () => {
+    const frame = document.createElement("iframe");
+    const originalDispatch = frame.dispatchEvent.bind(frame);
+    frame.dispatchEvent = (event) =>
+      event.type === "load" ? true : originalDispatch(event);
+    frame.setAttribute(BEACON_ATTRIBUTE.EMBED, "qualification-survey");
+    setRect(frame, rectOf(0, 400, 0, 300));
+    document.body.append(frame);
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { embeddedContentStallMs: 1, layoutOverflowSettleMs: 0 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "embedded_content_stalled")).toHaveLength(1);
+    frame.remove();
+  });
+
+  test("does not report a marked iframe that loads", async () => {
+    const frame = document.createElement("iframe");
+    frame.setAttribute(BEACON_ATTRIBUTE.EMBED, "document-preview");
+    setRect(frame, rectOf(0, 400, 0, 300));
+    document.body.append(frame);
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { embeddedContentStallMs: 1, layoutOverflowSettleMs: 0 },
+    });
+    frame.dispatchEvent(new Event("load"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "embedded_content_stalled")).toHaveLength(0);
+    frame.remove();
+  });
+
+  test("reports a visible WebGL context that does not restore", async () => {
+    const canvas = document.createElement("canvas");
+    canvas.className = "voice-visualizer";
+    setRect(canvas, rectOf(0, 200, 0, 200));
+    document.body.append(canvas);
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, webglRestoreGraceMs: 1 },
+    });
+    canvas.dispatchEvent(new Event("webglcontextlost"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "webgl_context_lost")).toHaveLength(1);
+    canvas.remove();
+  });
+
+  test("does not report a WebGL context restored inside the grace period", async () => {
+    const canvas = document.createElement("canvas");
+    setRect(canvas, rectOf(0, 200, 0, 200));
+    document.body.append(canvas);
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, webglRestoreGraceMs: 5 },
+    });
+    canvas.dispatchEvent(new Event("webglcontextlost"));
+    canvas.dispatchEvent(new Event("webglcontextrestored"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "webgl_context_lost")).toHaveLength(0);
+    canvas.remove();
+  });
+
+  test("reports rejected clipboard writes without capturing their contents", async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(
+      navigator,
+      "clipboard",
+    );
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => {
+          throw new DOMException("blocked", "NotAllowedError");
+        },
+      },
+    });
+    const button = document.createElement("button");
+    button.className = "copy-link";
+    document.body.append(button);
+    button.focus();
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await navigator.clipboard
+        .writeText("secret clipboard value")
+        .catch(() => undefined);
+      await beacon.flush();
+      const events = signalsSent(sent, "clipboard_failure");
+      expect(events).toHaveLength(1);
+      expect(JSON.stringify(events[0])).not.toContain("secret clipboard value");
+    } finally {
+      button.remove();
+      if (originalClipboard === undefined) {
+        Reflect.deleteProperty(navigator, "clipboard");
+      } else {
+        Object.defineProperty(navigator, "clipboard", originalClipboard);
+      }
+    }
+  });
+
+  test("reports a focused control left behind the mobile keyboard", async () => {
+    const originalViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const originalInnerHeight = Object.getOwnPropertyDescriptor(
+      window,
+      "innerHeight",
+    );
+    const viewport = Object.assign(new EventTarget(), {
+      height: 500,
+      offsetLeft: 0,
+      offsetTop: 0,
+      width: 1024,
+    });
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: viewport,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 800,
+    });
+    const input = document.createElement("input");
+    input.className = "message-input";
+    setRect(input, rectOf(0, 300, 700, 750));
+    document.body.append(input);
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { focusedControlSettleMs: 1, layoutOverflowSettleMs: 0 },
+      });
+      input.focus();
+      viewport.dispatchEvent(new Event("resize"));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await beacon.flush();
+      const events = signalsSent(sent, "focused_control_offscreen");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags?.obscuredPx).toBe("250");
+    } finally {
+      input.remove();
+      if (originalViewport === undefined) {
+        Reflect.deleteProperty(window, "visualViewport");
+      } else {
+        Object.defineProperty(window, "visualViewport", originalViewport);
+      }
+      if (originalInnerHeight === undefined) {
+        Reflect.deleteProperty(window, "innerHeight");
+      } else {
+        Object.defineProperty(window, "innerHeight", originalInnerHeight);
+      }
+    }
+  });
 });
 
 describe("overlay awareness", () => {

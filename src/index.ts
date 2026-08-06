@@ -27,13 +27,16 @@ export const BEACON_SIGNAL = {
   BROWSER_INTERVENTION: "browser_intervention",
   CONSOLE_ERROR: "console_error",
   CSP_VIOLATION: "csp_violation",
+  CLIPBOARD_FAILURE: "clipboard_failure",
   DEAD_CLICK: "dead_click",
   FETCH_FAILED: "fetch_failed",
   FOCUS_LOST: "focus_lost",
   FONT_FAILURE: "font_failure",
   FORM_FRUSTRATION: "form_frustration",
+  FOCUSED_CONTROL_OFFSCREEN: "focused_control_offscreen",
   HTTP_5XX: "http_5xx",
   INVISIBLE_TEXT: "invisible_text",
+  EMBEDDED_CONTENT_STALLED: "embedded_content_stalled",
   LAYOUT_OVERFLOW: "layout_overflow",
   MAIN_THREAD_STALL: "main_thread_stall",
   MODAL_FOCUS_ESCAPE: "modal_focus_escape",
@@ -50,6 +53,8 @@ export const BEACON_SIGNAL = {
   STALE_RELEASE: "stale_release",
   STALLED_STREAM: "stalled_stream",
   STUCK_LOADING: "stuck_loading",
+  THEME_MISMATCH: "theme_mismatch",
+  WEBGL_CONTEXT_LOST: "webgl_context_lost",
   SERVICE_WORKER_FAILURE: "service_worker_failure",
   WORKER_FAILURE: "worker_failure",
 } as const;
@@ -60,12 +65,19 @@ export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
 export const BEACON_ATTRIBUTE = {
   DEAD_CLICK: "data-beacon-dead-click",
   NAME: "data-beacon-name",
+  /** Names an iframe whose initial load should be watched for a stall. */
+  EMBED: "data-beacon-embed",
+  /** Marks loading UI that should participate in the stuck-loading watchdog. */
+  LOADING: "data-beacon-loading",
   /** `="allow"` exempts an element AND its subtree from layout-overflow
    * detection — for deliberate bleeds (decorative shapes, marquees). */
   OVERFLOW: "data-beacon-overflow",
   /** `="allow"` exempts an element AND its subtree from the visual scan
    * detectors (occluded controls, invisible text, stuck loading). */
   SCAN: "data-beacon-scan",
+  /** `="adaptive"` opts a subtree into theme-polarity checks; `="allow"`
+   * exempts an intentional opposite-theme surface and its subtree. */
+  THEME: "data-beacon-theme",
 } as const;
 
 /** Response header used to correlate a browser signal with its server request. */
@@ -182,6 +194,9 @@ export type BeaconSignals = {
   browserInterventions?: boolean;
   /** Enforced Content Security Policy violations. Default true. */
   cspViolations?: boolean;
+  /** Rejected clipboard writes, including failures handled by application
+   * code. Clipboard contents are never captured. Default true. */
+  clipboardFailures?: boolean;
   /** N rapid clicks in roughly the same spot. Default true. */
   rageClicks?: boolean;
   /** An interactive control clicked with no DOM/nav/scroll/focus/request response. Default true. */
@@ -203,6 +218,16 @@ export type BeaconSignals = {
   /** The same form submitted or failing native validation repeatedly within a
    *  minute — the quiet sibling of a rage click. Default true. */
   formFrustration?: boolean;
+  /** A focused editable control left outside the mobile visual viewport after
+   *  the on-screen keyboard settles. Default true. */
+  focusedControlsOffscreen?: boolean;
+  /** Grace period after focus/visual-viewport movement. Default 500ms. */
+  focusedControlSettleMs?: number;
+  /** Opt-in iframes marked with `data-beacon-embed` that never fire their
+   *  initial load event. Default true. */
+  embeddedContentStalls?: boolean;
+  /** Initial iframe load deadline. Default 15000ms. */
+  embeddedContentStallMs?: number;
   /** Sampled scan for text rendered nearly the same color as its opaque
    *  background (theme-token bugs). Default true. */
   invisibleText?: boolean;
@@ -284,6 +309,17 @@ export type BeaconSignals = {
   /** Age at which a visible loading indicator counts as stuck.
    *  Default 20000ms. */
   stuckLoadingMs?: number;
+  /** Opposite-polarity opaque surfaces inside subtrees explicitly marked
+   *  `data-beacon-theme="adaptive"`. Default true. */
+  themeMismatches?: boolean;
+  /** Visible surface area required for theme-polarity checks. Default
+   *  10000px². */
+  themeMismatchMinArea?: number;
+  /** Visible WebGL canvases whose context remains lost after a restoration
+   *  grace period. Default true. */
+  webglContextLosses?: boolean;
+  /** Grace period for `webglcontextrestored`. Default 2000ms. */
+  webglRestoreGraceMs?: number;
   /** Dedicated/shared worker construction, runtime, and message decoding
    *  failures. Default true. */
   workerFailures?: boolean;
@@ -1177,8 +1213,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const OCCLUSION_COVERAGE_MIN = 0.9;
   const INVISIBLE_TEXT_SAMPLE_LIMIT = 40;
   const INVISIBLE_TEXT_CONTRAST_MAX = 1.2;
+  const THEME_SURFACE_SAMPLE_LIMIT = 200;
+  const THEME_MISMATCH_DEFAULT_MIN_AREA = 10000;
+  const THEME_DARK_SURFACE_LUMINANCE_MAX = 0.12;
+  const THEME_LIGHT_SURFACE_LUMINANCE_MIN = 0.85;
   const STUCK_LOADING_DEFAULT_MS = 20000;
   const STUCK_LOADING_POLL_MS = 5000;
+  const EMBEDDED_CONTENT_STALL_DEFAULT_MS = 15000;
+  const WEBGL_RESTORE_GRACE_DEFAULT_MS = 2000;
+  const FOCUSED_CONTROL_SETTLE_DEFAULT_MS = 500;
+  const KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX = 0.8;
   const SCROLL_JAIL_EVENT_COUNT = 8;
   const SCROLL_JAIL_WINDOW_MS = 2000;
   const SCROLL_JAIL_BOUNDARY_TOLERANCE_PX = 2;
@@ -2146,6 +2190,58 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
   }
 
+  // Clipboard writes are commonly caught by application code, hiding a
+  // user-visible failure from the global rejection handler. The attempted
+  // clipboard contents are deliberately never inspected or retained.
+  if (
+    signals !== null &&
+    signals.clipboardFailures !== false &&
+    typeof navigator !== "undefined" &&
+    navigator.clipboard !== undefined &&
+    typeof navigator.clipboard.writeText === "function"
+  ) {
+    const clipboard = navigator.clipboard;
+    const originalWriteText = clipboard.writeText;
+    const wrappedWriteText: Clipboard["writeText"] = async (value) => {
+      const target =
+        typeof document !== "undefined" &&
+        document.activeElement instanceof Element
+          ? describeElement(document.activeElement)
+          : "unknown";
+      const activation = navigator.userActivation?.isActive ?? false;
+      try {
+        return await originalWriteText.call(clipboard, value);
+      } catch (error) {
+        if (
+          !pageLifecycleEnding &&
+          typeof document !== "undefined" &&
+          document.visibilityState !== "hidden"
+        ) {
+          const resolved = toError(error);
+          emitSignal(
+            `Clipboard write failed — ${target} — ${shortUrl(location.href)}`,
+            {
+              errorName: resolved.name,
+              secureContext: String(globalThis.isSecureContext === true),
+              signal: BEACON_SIGNAL.CLIPBOARD_FAILURE,
+              target,
+              userActivation: String(activation),
+            },
+          );
+        }
+        throw error;
+      }
+    };
+    try {
+      clipboard.writeText = wrappedWriteText;
+      cleanups.push(() => {
+        clipboard.writeText = originalWriteText;
+      });
+    } catch {
+      // Some browser hosts expose a non-writable Clipboard object.
+    }
+  }
+
   if (instrument.clicks !== false && typeof document !== "undefined") {
     if (signals !== null) {
       const originalWindowOpen = window.open;
@@ -2259,11 +2355,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const detectOcclusion = signals.occludedControls !== false;
     const detectInvisibleText = signals.invisibleText !== false;
     const detectStuckLoading = signals.stuckLoading !== false;
+    const detectThemeMismatch = signals.themeMismatches !== false;
     const overflowSettleMs =
       signals.layoutOverflowSettleMs ?? LAYOUT_OVERFLOW_SETTLE_DEFAULT_MS;
     const overflowMaxReports =
       signals.layoutOverflowMaxReports ?? LAYOUT_OVERFLOW_MAX_REPORTS_DEFAULT;
     const stuckLoadingMs = signals.stuckLoadingMs ?? STUCK_LOADING_DEFAULT_MS;
+    const themeMismatchMinArea =
+      signals.themeMismatchMinArea ?? THEME_MISMATCH_DEFAULT_MIN_AREA;
     const seenOverflows = new Set<string>();
     let overflowReports = 0;
     let overflowTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2695,6 +2794,87 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       }
     };
 
+    // Only explicitly adaptive subtrees participate. Without that contract an
+    // intentional inverted hero is indistinguishable from a missed theme.
+    const activeTheme = (): "dark" | "light" | null => {
+      const root = document.documentElement;
+      const declared = window.getComputedStyle(root).colorScheme.trim();
+      if (declared === "dark") return "dark";
+      if (declared === "light") return "light";
+      const dataTheme = root.getAttribute("data-theme");
+      if (dataTheme === "dark" || dataTheme === "light") return dataTheme;
+      if (root.classList.contains("dark")) return "dark";
+
+      return null;
+    };
+    const scanForThemeMismatch = (): void => {
+      const theme = activeTheme();
+      if (theme === null) return;
+      const roots = document.querySelectorAll(
+        `[${BEACON_ATTRIBUTE.THEME}="adaptive"]`,
+      );
+      const viewportWidth = document.documentElement.clientWidth;
+      const viewportHeight = document.documentElement.clientHeight;
+      let sampled = 0;
+      for (const root of Array.from(roots)) {
+        const candidates = [root, ...Array.from(root.querySelectorAll("*"))];
+        for (const element of candidates) {
+          if (sampled >= THEME_SURFACE_SAMPLE_LIMIT) return;
+          if (
+            element.closest(`[${BEACON_ATTRIBUTE.THEME}="allow"]`) !== null ||
+            isScanExempt(element) ||
+            element.matches("canvas, iframe, img, picture, svg, video")
+          ) {
+            continue;
+          }
+          const rect = element.getBoundingClientRect();
+          if (rect.width * rect.height < themeMismatchMinArea) continue;
+          if (
+            rect.bottom < 0 ||
+            rect.top > viewportHeight ||
+            rect.right < 0 ||
+            rect.left > viewportWidth
+          ) {
+            continue;
+          }
+          const hasContent =
+            (element.textContent ?? "").trim() !== "" ||
+            element.querySelector(
+              "button, input, select, textarea, [role=button]",
+            ) !== null;
+          if (!hasContent) continue;
+          const style = window.getComputedStyle(element);
+          if (
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            (style.backgroundImage !== "none" && style.backgroundImage !== "")
+          ) {
+            continue;
+          }
+          const surface = parseColor(style.backgroundColor);
+          if (surface === null || surface.a < 0.95) continue;
+          sampled += 1;
+          const luminance = relativeLuminance(surface);
+          const opposite =
+            theme === "dark"
+              ? luminance >= THEME_LIGHT_SURFACE_LUMINANCE_MIN
+              : luminance <= THEME_DARK_SURFACE_LUMINANCE_MAX;
+          if (!opposite) continue;
+          reportScanIssue(
+            element,
+            BEACON_SIGNAL.THEME_MISMATCH,
+            `Theme mismatch — ${describeElement(element)} renders an opposite-polarity surface in ${theme} mode`,
+            {
+              activeTheme: theme,
+              area: String(Math.round(rect.width * rect.height)),
+              surfaceColor: style.backgroundColor,
+              surfaceLuminance: luminance.toFixed(3),
+            },
+          );
+        }
+      }
+    };
+
     // — stuck loading: first-seen timestamps survive across scans; a slow
     //   poll catches spinners that hang while the user does nothing at all.
     const loadingFirstSeen = new WeakMap<Element, number>();
@@ -2702,7 +2882,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const checkStuckLoading = (): void => {
       if (document.visibilityState === "hidden") return;
       const indicators = document.querySelectorAll(
-        '[aria-busy="true"], [role="progressbar"]',
+        `[aria-busy="true"], [role="progressbar"], [${BEACON_ATTRIBUTE.LOADING}]`,
       );
       const now = Date.now();
       for (const indicator of Array.from(indicators)) {
@@ -2734,6 +2914,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (detectOverflow) scanForOverflow();
       if (detectOcclusion) scanForOcclusion();
       if (detectInvisibleText) scanForInvisibleText();
+      if (detectThemeMismatch) scanForThemeMismatch();
       if (detectStuckLoading) checkStuckLoading();
     };
 
@@ -2753,9 +2934,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       cleanups.push(() => window.removeEventListener("load", onLoad));
     }
     window.addEventListener("resize", scheduleOverflowScan);
+    const themeObserver = new MutationObserver(scheduleOverflowScan);
+    themeObserver.observe(document.documentElement, {
+      attributeFilter: ["class", "data-theme", "style"],
+      attributes: true,
+    });
     overflowScanOnNavigation = scheduleOverflowScan;
     cleanups.push(() => {
       window.removeEventListener("resize", scheduleOverflowScan);
+      themeObserver.disconnect();
       overflowScanOnNavigation = null;
       if (overflowTimer !== undefined) clearTimeout(overflowTimer);
     });
@@ -2766,8 +2953,235 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
   }
 
+  // Opt-in embedded content watchdog. Cross-origin error documents can still
+  // dispatch `load`, so the only generic claim Beacon makes is the defensible
+  // one: a marked, visible iframe never loaded at all.
+  if (
+    signals !== null &&
+    signals.embeddedContentStalls !== false &&
+    typeof document !== "undefined"
+  ) {
+    const stallMs =
+      signals.embeddedContentStallMs ?? EMBEDDED_CONTENT_STALL_DEFAULT_MS;
+    const watched = new Map<
+      HTMLIFrameElement,
+      { onLoad: () => void; timer: ReturnType<typeof setTimeout> }
+    >();
+    const stopWatching = (frame: HTMLIFrameElement): void => {
+      const state = watched.get(frame);
+      if (state === undefined) return;
+      clearTimeout(state.timer);
+      frame.removeEventListener("load", state.onLoad);
+      watched.delete(frame);
+    };
+    const watchFrame = (frame: HTMLIFrameElement): void => {
+      stopWatching(frame);
+      const name = frame.getAttribute(BEACON_ATTRIBUTE.EMBED);
+      if (name === null) return;
+      const onLoad = (): void => stopWatching(frame);
+      const timer = setTimeout(() => {
+        stopWatching(frame);
+        if (
+          pageLifecycleEnding ||
+          document.visibilityState === "hidden" ||
+          !frame.isConnected
+        ) {
+          return;
+        }
+        const rect = frame.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const source = frame.getAttribute("src") ?? "";
+        emitSignal(
+          `Embedded content stalled — ${describeElement(frame)} never loaded — ${shortUrl(location.href)}`,
+          {
+            embed: name.slice(0, 64),
+            elapsedMs: String(stallMs),
+            signal: BEACON_SIGNAL.EMBEDDED_CONTENT_STALLED,
+            sourcePath: shortUrl(source),
+            target: describeElement(frame),
+          },
+        );
+      }, stallMs);
+      watched.set(frame, { onLoad, timer });
+      frame.addEventListener("load", onLoad, { once: true });
+    };
+    const discoverFrames = (root: ParentNode): void => {
+      if (
+        root instanceof HTMLIFrameElement &&
+        root.hasAttribute(BEACON_ATTRIBUTE.EMBED)
+      ) {
+        watchFrame(root);
+      }
+      for (const frame of Array.from(
+        root.querySelectorAll<HTMLIFrameElement>(
+          `iframe[${BEACON_ATTRIBUTE.EMBED}]`,
+        ),
+      )) {
+        watchFrame(frame);
+      }
+    };
+    discoverFrames(document);
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === "attributes") {
+          if (record.target instanceof HTMLIFrameElement) {
+            watchFrame(record.target);
+          }
+          continue;
+        }
+        for (const node of Array.from(record.addedNodes)) {
+          if (node instanceof Element) discoverFrames(node);
+        }
+        for (const node of Array.from(record.removedNodes)) {
+          if (node instanceof HTMLIFrameElement) stopWatching(node);
+          if (node instanceof Element) {
+            for (const frame of Array.from(node.querySelectorAll("iframe"))) {
+              stopWatching(frame);
+            }
+          }
+        }
+      }
+    });
+    observer.observe(document.documentElement, {
+      attributeFilter: [BEACON_ATTRIBUTE.EMBED, "src"],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    cleanups.push(() => {
+      observer.disconnect();
+      for (const frame of Array.from(watched.keys())) stopWatching(frame);
+    });
+  }
+
+  if (
+    signals !== null &&
+    signals.webglContextLosses !== false &&
+    typeof document !== "undefined"
+  ) {
+    const graceMs =
+      signals.webglRestoreGraceMs ?? WEBGL_RESTORE_GRACE_DEFAULT_MS;
+    const pending = new Map<HTMLCanvasElement, ReturnType<typeof setTimeout>>();
+    const reported = new WeakSet<HTMLCanvasElement>();
+    const clearPending = (canvas: HTMLCanvasElement): void => {
+      const timer = pending.get(canvas);
+      if (timer !== undefined) clearTimeout(timer);
+      pending.delete(canvas);
+    };
+    const onLost = (event: Event): void => {
+      if (!(event.target instanceof HTMLCanvasElement)) return;
+      const canvas = event.target;
+      clearPending(canvas);
+      const timer = setTimeout(() => {
+        pending.delete(canvas);
+        if (
+          reported.has(canvas) ||
+          pageLifecycleEnding ||
+          document.visibilityState === "hidden" ||
+          !canvas.isConnected
+        ) {
+          return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        reported.add(canvas);
+        emitSignal(
+          `WebGL context lost — ${describeElement(canvas)} did not restore — ${shortUrl(location.href)}`,
+          {
+            canvasHeight: String(canvas.height),
+            canvasWidth: String(canvas.width),
+            graceMs: String(graceMs),
+            signal: BEACON_SIGNAL.WEBGL_CONTEXT_LOST,
+            target: describeElement(canvas),
+          },
+        );
+      }, graceMs);
+      pending.set(canvas, timer);
+    };
+    const onRestored = (event: Event): void => {
+      if (event.target instanceof HTMLCanvasElement) clearPending(event.target);
+    };
+    document.addEventListener("webglcontextlost", onLost, true);
+    document.addEventListener("webglcontextrestored", onRestored, true);
+    cleanups.push(() => {
+      document.removeEventListener("webglcontextlost", onLost, true);
+      document.removeEventListener("webglcontextrestored", onRestored, true);
+      for (const timer of pending.values()) clearTimeout(timer);
+      pending.clear();
+    });
+  }
+
   // ——— Interaction watchdogs ———————————————————————————————————————————
   if (signals !== null && typeof document !== "undefined") {
+    if (
+      signals.focusedControlsOffscreen !== false &&
+      window.visualViewport !== undefined &&
+      window.visualViewport !== null
+    ) {
+      const visualViewport = window.visualViewport;
+      const settleMs =
+        signals.focusedControlSettleMs ?? FOCUSED_CONTROL_SETTLE_DEFAULT_MS;
+      const reported = new Set<string>();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const checkFocusedControl = (): void => {
+        timer = undefined;
+        if (
+          pageLifecycleEnding ||
+          document.visibilityState === "hidden" ||
+          visualViewport.height >=
+            window.innerHeight * KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX
+        ) {
+          return;
+        }
+        const active = document.activeElement;
+        const editable =
+          active instanceof HTMLInputElement ||
+          active instanceof HTMLTextAreaElement ||
+          (active instanceof HTMLElement && active.isContentEditable);
+        if (!editable || !(active instanceof HTMLElement)) return;
+        const rect = active.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+        const viewportTop = visualViewport.offsetTop;
+        const viewportBottom = viewportTop + visualViewport.height;
+        const obscuredPx = Math.max(
+          viewportTop - rect.top,
+          rect.bottom - viewportBottom,
+          0,
+        );
+        if (obscuredPx <= 1) return;
+        const target = describeElement(active);
+        const key = target;
+        if (reported.has(key)) return;
+        reported.add(key);
+        emitSignal(
+          `Focused control offscreen — ${target} is outside the mobile visual viewport — ${shortUrl(location.href)}`,
+          {
+            layoutViewportHeight: String(window.innerHeight),
+            obscuredPx: String(Math.round(obscuredPx)),
+            signal: BEACON_SIGNAL.FOCUSED_CONTROL_OFFSCREEN,
+            target,
+            visualViewportHeight: String(Math.round(visualViewport.height)),
+            visualViewportOffsetTop: String(
+              Math.round(visualViewport.offsetTop),
+            ),
+          },
+        );
+      };
+      const scheduleCheck = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        timer = setTimeout(checkFocusedControl, settleMs);
+      };
+      document.addEventListener("focusin", scheduleCheck, true);
+      visualViewport.addEventListener("resize", scheduleCheck);
+      visualViewport.addEventListener("scroll", scheduleCheck);
+      cleanups.push(() => {
+        document.removeEventListener("focusin", scheduleCheck, true);
+        visualViewport.removeEventListener("resize", scheduleCheck);
+        visualViewport.removeEventListener("scroll", scheduleCheck);
+        if (timer !== undefined) clearTimeout(timer);
+      });
+    }
+
     // Scroll jail: repeated wheel input over scrollable-but-immobile content
     // — the scroll lock a closed modal forgot to release. Boundary no-ops
     // (already at the top/bottom) and app-handled wheels (preventDefault:

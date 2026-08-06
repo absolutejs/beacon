@@ -128,6 +128,21 @@ beacon.captureMessage("checkout started", "info");
   frustration (identical resubmits / repeated native-validation failures).
   Each is individually toggleable on `signals`, deduped, capped, and exempts
   `data-beacon-scan="allow"` subtrees where a DOM scan is involved.
+- **Theme and loading contracts** — mark an application boundary with
+  `data-beacon-theme="adaptive"` to report large opaque surfaces whose
+  luminance polarity contradicts the active light/dark mode. Intentional
+  inverted brand/media surfaces use `data-beacon-theme="allow"`. Loading UI
+  participates through native `aria-busy`/`role="progressbar"` semantics or
+  `data-beacon-loading`, without coupling the SDK to framework class names.
+- **Browser capability failures** — rejected clipboard writes are observed even
+  when application code catches them (contents are never read), visible WebGL
+  contexts that do not restore after `webglcontextlost` become warnings, and a
+  focused editable control stranded behind the mobile visual viewport is
+  reported after the keyboard settles.
+- **Embedded-content stalls** — visible iframes explicitly named with
+  `data-beacon-embed` report when their initial `load` never arrives. Generic
+  cross-origin error pages cannot be inspected, so Beacon deliberately makes no
+  stronger claim than the load deadline.
 - **Actionable network signals** — expected aborts remain breadcrumbs instead of
   issues; offline, timeout, isolated-endpoint, and multi-endpoint connectivity
   failures are classified separately. HTTP 429 responses and repeated 401/403
