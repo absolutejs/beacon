@@ -25,28 +25,42 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_SIGNAL = {
   AUTH_FAILURE_STORM: "auth_failure_storm",
   BROWSER_INTERVENTION: "browser_intervention",
+  BROWSER_POLICY_VIOLATION: "browser_policy_violation",
+  BFCACHE_BLOCKED: "bfcache_blocked",
+  CAPABILITY_FAILURE: "capability_failure",
+  BLANK_APP_ROOT: "blank_app_root",
   CONSOLE_ERROR: "console_error",
   CSP_VIOLATION: "csp_violation",
   CLIPBOARD_FAILURE: "clipboard_failure",
   DEAD_CLICK: "dead_click",
+  DISRUPTIVE_LAYOUT_SHIFT: "disruptive_layout_shift",
+  DOCUMENT_DISCARDED: "document_discarded",
+  ERROR_CLICK: "error_click",
   FETCH_FAILED: "fetch_failed",
   FOCUS_LOST: "focus_lost",
   FONT_FAILURE: "font_failure",
   FORM_FRUSTRATION: "form_frustration",
+  FORM_ABANDONMENT: "form_abandonment",
   FOCUSED_CONTROL_OFFSCREEN: "focused_control_offscreen",
   HTTP_5XX: "http_5xx",
   INVISIBLE_TEXT: "invisible_text",
   EMBEDDED_CONTENT_STALLED: "embedded_content_stalled",
   LAYOUT_OVERFLOW: "layout_overflow",
   MAIN_THREAD_STALL: "main_thread_stall",
+  MEDIA_PLAYBACK_FAILED: "media_playback_failed",
+  MEDIA_PLAYBACK_STALLED: "media_playback_stalled",
   MODAL_FOCUS_ESCAPE: "modal_focus_escape",
   OCCLUDED_CONTROL: "occluded_control",
   RAGE_CLICK: "rage_click",
   RATE_LIMITED: "rate_limited",
+  NAVIGATION_STALLED: "navigation_stalled",
   RELOAD_LOOP: "reload_loop",
   REQUEST_STORM: "request_storm",
+  SEMANTIC_RESPONSE_FAILURE: "semantic_response_failure",
   SCROLL_JAIL: "scroll_jail",
   SLOW_RESPONSE: "slow_response",
+  SLOW_RESOURCE: "slow_resource",
+  SLOW_INTERACTION: "slow_interaction",
   SOCKET_ABNORMAL_CLOSE: "socket_abnormal_close",
   SOCKET_FLAPPING: "socket_flapping",
   SSE_FLAPPING: "sse_flapping",
@@ -54,6 +68,8 @@ export const BEACON_SIGNAL = {
   STALLED_STREAM: "stalled_stream",
   STUCK_LOADING: "stuck_loading",
   THEME_MISMATCH: "theme_mismatch",
+  THRASHED_CURSOR: "thrashed_cursor",
+  STORAGE_FAILURE: "storage_failure",
   WEBGL_CONTEXT_LOST: "webgl_context_lost",
   SERVICE_WORKER_FAILURE: "service_worker_failure",
   WORKER_FAILURE: "worker_failure",
@@ -63,12 +79,18 @@ export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
 
 /** Stable DOM attributes understood by Beacon's instrumentation. */
 export const BEACON_ATTRIBUTE = {
+  /** Names an application root whose settled empty state is a failure. */
+  APP_ROOT: "data-beacon-app-root",
   DEAD_CLICK: "data-beacon-dead-click",
   NAME: "data-beacon-name",
   /** Names an iframe whose initial load should be watched for a stall. */
   EMBED: "data-beacon-embed",
   /** Marks loading UI that should participate in the stuck-loading watchdog. */
   LOADING: "data-beacon-loading",
+  /** Names a form whose dirty navigation should be reported as abandonment. */
+  FORM: "data-beacon-form",
+  /** Names media whose user-visible playback should be watched. */
+  MEDIA: "data-beacon-media",
   /** `="allow"` exempts an element AND its subtree from layout-overflow
    * detection — for deliberate bleeds (decorative shapes, marquees). */
   OVERFLOW: "data-beacon-overflow",
@@ -165,6 +187,30 @@ export type BeaconInstrumentation = {
   xhr?: boolean;
   /** Breadcrumb SPA navigations (`pushState`/`replaceState`/`popstate`). Default true. */
   history?: boolean;
+  /** Record Network Information API changes as breadcrumbs. Default true. */
+  networkChanges?: boolean;
+  /** Record application-authored Performance API measures as breadcrumbs.
+   * Default false because measure names are host-owned. */
+  userTiming?: boolean;
+  /** Privacy-owned application classifier for successful HTTP responses that
+   * encode a semantic failure (for example GraphQL errors in an HTTP 200).
+   * Beacon never reads or stores the response body itself. */
+  classifyResponse?: (
+    response: Response,
+    request: { method: string; url: string },
+  ) =>
+    | void
+    | false
+    | { groupingKey: string; message: string; tags?: Record<string, string> }
+    | Promise<
+        | void
+        | false
+        | {
+            groupingKey: string;
+            message: string;
+            tags?: Record<string, string>;
+          }
+      >;
 };
 
 export type BeaconResourceFailure = {
@@ -183,6 +229,12 @@ export type BeaconResourceFailure = {
  * `console.error`. Each detector is feature-gated and independently tunable.
  */
 export type BeaconSignals = {
+  /** Back/forward navigations the browser could not restore from bfcache. */
+  bfcacheBlocks?: boolean;
+  /** Marked application roots that settle without meaningful visible content. */
+  blankAppRoots?: boolean;
+  /** Delay before an application root is evaluated. Default 3000ms. */
+  blankAppRootSettleMs?: number;
   /** Repeated 401/403 responses from one endpoint inside a short window.
    *  Default true. */
   authFailureStorms?: boolean;
@@ -192,6 +244,9 @@ export type BeaconSignals = {
   authFailureStormWindowMs?: number;
   /** Browser intervention reports surfaced by ReportingObserver. Default true. */
   browserInterventions?: boolean;
+  /** Deprecation, permissions-policy, integrity, and cross-origin policy
+   * reports exposed by ReportingObserver. Default true. */
+  browserPolicyViolations?: boolean;
   /** Enforced Content Security Policy violations. Default true. */
   cspViolations?: boolean;
   /** Rejected clipboard writes, including failures handled by application
@@ -201,6 +256,10 @@ export type BeaconSignals = {
   rageClicks?: boolean;
   /** An interactive control clicked with no DOM/nav/scroll/focus/request response. Default true. */
   deadClicks?: boolean;
+  /** A user interaction followed shortly by an error. Default true. */
+  errorClicks?: boolean;
+  /** Correlation window between interaction and error. Default 2000ms. */
+  errorClickWindowMs?: number;
   /** Responses with status >= 500. Default true. */
   serverErrors?: boolean;
   /** Responses slower than `slowResponseMs`. Default true. */
@@ -218,6 +277,8 @@ export type BeaconSignals = {
   /** The same form submitted or failing native validation repeatedly within a
    *  minute — the quiet sibling of a rage click. Default true. */
   formFrustration?: boolean;
+  /** Dirty marked forms left without a successful submission. Default true. */
+  formAbandonment?: boolean;
   /** A focused editable control left outside the mobile visual viewport after
    *  the on-screen keyboard settles. Default true. */
   focusedControlsOffscreen?: boolean;
@@ -240,6 +301,12 @@ export type BeaconSignals = {
    * popovers, drawers) are skipped by design. Default true.
    */
   layoutOverflows?: boolean;
+  /** Large unexpected Layout Instability API entries with culprit elements. */
+  disruptiveLayoutShifts?: boolean;
+  /** Individual unexpected shift score that becomes an issue. Default 0.1. */
+  disruptiveLayoutShiftMin?: number;
+  /** A page reloaded after the browser discarded its previous document. */
+  documentDiscards?: boolean;
   /** Maximum layout-overflow issues reported per page load. Default 5. */
   layoutOverflowMaxReports?: number;
   /** Quiet period after load/resize/navigation before the settled visual
@@ -247,6 +314,14 @@ export type BeaconSignals = {
   layoutOverflowSettleMs?: number;
   /** Repeated long animation frames/tasks on a visible page. Default true. */
   mainThreadStalls?: boolean;
+  /** Responding interactions that exceed the latency threshold. Default true. */
+  slowInteractions?: boolean;
+  /** Interaction duration that becomes a warning. Default 1000ms. */
+  slowInteractionMs?: number;
+  /** Opt-in marked media playback failures and sustained stalls. Default true. */
+  mediaFailures?: boolean;
+  /** Time continuously waiting/stalled before reporting. Default 10000ms. */
+  mediaStallMs?: number;
   /** Long-frame duration that counts as a main-thread stall. Default 200ms. */
   mainThreadStallMs?: number;
   /** Stalls inside the window that trip a report. Default 3. */
@@ -267,6 +342,8 @@ export type BeaconSignals = {
   /** Several full page loads within a minute — a crash or reload loop.
    *  Default true. */
   reloadLoops?: boolean;
+  /** SPA navigations accepted by a router but never settled. Default true. */
+  stalledNavigations?: boolean;
   /** The same endpoint hit `requestStormCount` times inside
    *  `requestStormWindowMs` — refetch loops and retry storms. Needs the
    *  fetch/XHR instrumentation. Default true. */
@@ -331,6 +408,16 @@ export type BeaconSignals = {
   navigationResponseMs?: number;
   /** Slow-response threshold (ms). Default 8000. */
   slowResponseMs?: number;
+  /** Slow successful static resources from Resource Timing. Default true. */
+  slowResources?: boolean;
+  /** Static resource duration that becomes a warning. Default 5000ms. */
+  slowResourceMs?: number;
+  /** Browser storage writes and IndexedDB operations that fail. Default true. */
+  storageFailures?: boolean;
+  /** Erratic desktop pointer movement indicating confusion/waiting. Default true. */
+  thrashedCursors?: boolean;
+  /** Cursor direction reversals inside the detection window. Default 8. */
+  thrashedCursorReversals?: number;
 };
 
 export type BeaconNetworkFailure = {
@@ -345,6 +432,12 @@ export type BeaconNetworkFailure = {
   };
   method: string;
   online: boolean | null;
+  connection?: {
+    downlink?: number;
+    effectiveType?: string;
+    rtt?: number;
+    saveData?: boolean;
+  };
   transport: "fetch" | "xhr";
   visibilityState: string;
 };
@@ -424,6 +517,8 @@ export type WebVital = {
   sdkVersion?: string;
   /** Optional W3C trace correlation. */
   traceId?: string;
+  /** Privacy-bounded field attribution supplied by web-vitals/attribution. */
+  attribution?: Record<string, unknown>;
 };
 
 /** Override Web Vital delivery without changing collection semantics. */
@@ -435,6 +530,7 @@ type WebVitalMetric = {
   rating: string;
   id: string;
   navigationType: string;
+  attribution?: Record<string, unknown>;
 };
 type WebVitalReporter = (callback: (metric: WebVitalMetric) => void) => void;
 /** The subset of the `web-vitals` package surface beacon uses. */
@@ -485,6 +581,9 @@ export type Beacon = {
   setTags: (tags: BeaconTags) => void;
   /** Set (or clear, with null) the user attached to events. */
   setUser: (user: { id?: string; email?: string } | null) => void;
+  /** Observe an application-owned browser capability promise without globally
+   * monkey-patching sensitive platform APIs. */
+  observeCapability: <T>(name: string, operation: Promise<T>) => Promise<T>;
   /** Flush buffered events now. */
   flush: () => Promise<void>;
   /** Remove all listeners + do a final flush. */
@@ -1110,8 +1209,40 @@ const observeLongTasks = (
 const isVitalName = (name: string): name is WebVital["name"] =>
   VITAL_NAMES.has(name);
 
+const vitalAttribution = (
+  value: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined => {
+  if (value === undefined) return undefined;
+  const allowed = [
+    "element",
+    "elementRenderDelay",
+    "inputDelay",
+    "interactionTarget",
+    "interactionType",
+    "largestShiftTarget",
+    "largestShiftValue",
+    "loadState",
+    "presentationDelay",
+    "processingDuration",
+    "resourceLoadDelay",
+    "resourceLoadDuration",
+    "timeToFirstByte",
+    "url",
+  ];
+  const result: Record<string, unknown> = {};
+  for (const key of allowed) {
+    const item = value[key];
+    if (typeof item === "string") result[key] = item.slice(0, 300);
+    else if (typeof item === "number" || typeof item === "boolean")
+      result[key] = item;
+  }
+
+  return Object.keys(result).length === 0 ? undefined : result;
+};
+
 const loadWebVitals = async (): Promise<WebVitalsModule> => {
-  const mod = (await import("web-vitals")) as unknown as WebVitalsModule;
+  const mod =
+    (await import("web-vitals/attribution")) as unknown as WebVitalsModule;
 
   return mod;
 };
@@ -1136,6 +1267,8 @@ const noopBeacon: Beacon = {
   captureMessage: () => {},
   close: async () => {},
   flush: async () => {},
+  observeCapability: async <T>(_name: string, operation: Promise<T>) =>
+    operation,
   setTags: () => {},
   setUser: () => {},
 };
@@ -1200,6 +1333,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const RAGE_WINDOW_MS = 1000;
   const RAGE_RADIUS_PX = 40;
   const DEAD_CLICK_WINDOW_MS = 1500;
+  const ERROR_CLICK_WINDOW_DEFAULT_MS = 2000;
+  const SLOW_INTERACTION_DEFAULT_MS = 1000;
+  const BLANK_APP_ROOT_SETTLE_DEFAULT_MS = 3000;
+  const DISRUPTIVE_LAYOUT_SHIFT_DEFAULT_MIN = 0.1;
+  const SLOW_RESOURCE_DEFAULT_MS = 5000;
+  const MEDIA_STALL_DEFAULT_MS = 10000;
+  const THRASHED_CURSOR_DEFAULT_REVERSALS = 8;
+  const THRASHED_CURSOR_WINDOW_MS = 2000;
   const NAVIGATION_RESPONSE_DEFAULT_MS = 8000;
   const LAYOUT_OVERFLOW_SETTLE_DEFAULT_MS = 600;
   const LAYOUT_OVERFLOW_MAX_REPORTS_DEFAULT = 5;
@@ -1261,6 +1402,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let externalNavigationCount = 0;
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
+  let recentInteraction:
+    | { at: number; target: string; type: "click" | "submit" | "keyboard" }
+    | undefined;
+  let reportErrorClick: ((errorName: string) => void) | null = null;
+  let reportFormAbandonmentOnNavigation: (() => void) | null = null;
   // Set by the settled-scan watchdogs so SPA navigations recorded by the
   // history instrumentation also schedule a post-settle scan.
   let overflowScanOnNavigation: (() => void) | null = null;
@@ -1335,6 +1481,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           : { sdkVersion: vitalsOptions.sdkVersion }),
         ...(traceId === undefined ? {} : { traceId }),
         value: metric.value,
+        ...(vitalAttribution(metric.attribution) === undefined
+          ? {}
+          : { attribution: vitalAttribution(metric.attribution) }),
       };
       vitalsOptions.onVital?.(vital);
       if (vitalsOptions.transport !== undefined) {
@@ -1392,6 +1541,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let flushPendingNetworkFailures = (): void => {};
   let tags: BeaconTags = {};
   let user: { id?: string; email?: string } | undefined;
+  let actionSequence = 0;
+  let activeAction:
+    { at: number; id: string; target: string; type: string } | undefined;
+  const beginAction = (type: string, target: string): void => {
+    actionSequence += 1;
+    activeAction = {
+      at: Date.now(),
+      id: `${sessionId}:${actionSequence}`,
+      target,
+      type,
+    };
+  };
 
   const flush = async (useBeacon = false): Promise<void> => {
     flushPendingNetworkFailures();
@@ -1429,7 +1590,21 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const enriched: BeaconEvent = { ...event, at: event.at ?? Date.now() };
     const replayId = options.getReplayId?.();
     if (replayId !== undefined) enriched.replayId = replayId;
-    const mergedTags = { ...tags, ...event.tags };
+    const action =
+      activeAction !== undefined && Date.now() - activeAction.at <= 10_000
+        ? activeAction
+        : undefined;
+    const mergedTags = {
+      ...tags,
+      ...(action === undefined
+        ? {}
+        : {
+            actionId: action.id,
+            actionTarget: action.target,
+            actionType: action.type,
+          }),
+      ...event.tags,
+    };
     if (Object.keys(mergedTags).length > 0) enriched.tags = mergedTags;
     const extra: Record<string, unknown> = { sessionId, ...event.extra };
     if (breadcrumbs.length > 0) extra.breadcrumbs = [...breadcrumbs];
@@ -1536,6 +1711,56 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       ...(traceId !== undefined ? { traceId } : {}),
       ...(extra !== undefined ? { extra } : {}),
     });
+  };
+
+  if (signals !== null && signals.errorClicks !== false) {
+    const windowMs =
+      signals.errorClickWindowMs ?? ERROR_CLICK_WINDOW_DEFAULT_MS;
+    reportErrorClick = (errorName): void => {
+      const interaction = recentInteraction;
+      if (interaction === undefined || Date.now() - interaction.at > windowMs)
+        return;
+      recentInteraction = undefined;
+      emitSignal(
+        `Error click — ${interaction.target} — ${shortUrl(location.href)}`,
+        {
+          errorName,
+          interactionType: interaction.type,
+          signal: BEACON_SIGNAL.ERROR_CLICK,
+          target: interaction.target,
+        },
+      );
+    };
+    cleanups.push(() => {
+      reportErrorClick = null;
+    });
+  }
+
+  const observeCapability: Beacon["observeCapability"] = async (
+    name,
+    operation,
+  ) => {
+    try {
+      return await operation;
+    } catch (error) {
+      const resolved = toError(error);
+      captureException(
+        errorWithoutStack(
+          "CapabilityFailure",
+          `Browser capability failed — ${name}`,
+        ),
+        {
+          groupingKey: `browser-capability:${name}`,
+          level: "warning",
+          tags: {
+            capability: name.slice(0, SIGNAL_TEXT_MAX),
+            errorName: resolved.name,
+            signal: BEACON_SIGNAL.CAPABILITY_FAILURE,
+          },
+        },
+      );
+      throw error;
+    }
   };
 
   const responseTraceId = (value: string | null): string | undefined => {
@@ -1659,8 +1884,36 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const networkState = () => {
     const online: boolean | null =
       typeof navigator.onLine === "boolean" ? navigator.onLine : null;
+    const connection = (
+      navigator as Navigator & {
+        connection?: {
+          downlink?: number;
+          effectiveType?: string;
+          rtt?: number;
+          saveData?: boolean;
+        };
+      }
+    ).connection;
 
     return {
+      ...(connection === undefined
+        ? {}
+        : {
+            connection: {
+              ...(typeof connection.downlink === "number"
+                ? { downlink: connection.downlink }
+                : {}),
+              ...(typeof connection.effectiveType === "string"
+                ? { effectiveType: connection.effectiveType }
+                : {}),
+              ...(typeof connection.rtt === "number"
+                ? { rtt: connection.rtt }
+                : {}),
+              ...(typeof connection.saveData === "boolean"
+                ? { saveData: connection.saveData }
+                : {}),
+            },
+          }),
       online,
       visibilityState:
         typeof document.visibilityState === "string"
@@ -1778,6 +2031,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       },
       method: method.toUpperCase(),
       online: state.online,
+      ...(state.connection === undefined
+        ? {}
+        : { connection: state.connection }),
       transport: transportKind,
       visibilityState: state.visibilityState,
     };
@@ -1798,7 +2054,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const observeClickResponse = (
     control: Element,
     event: Event,
-    report: (responded: boolean) => void,
+    report: (responded: boolean, navigationStalled: boolean) => void,
   ): void => {
     const urlBefore = location.href;
     const scrollBefore = window.scrollY;
@@ -1824,14 +2080,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       document.activeElement !== activeBefore ||
       networkRequestCount !== networkRequestsBefore ||
       externalNavigationCount !== externalNavigationsBefore;
-    const finish = (didRespond: boolean): void => {
+    const finish = (didRespond: boolean, navigationStalled = false): void => {
       if (finished) return;
       finished = true;
       observer.disconnect();
       control.removeEventListener("click", observeRouterAcceptance);
       if (timer !== undefined) window.clearTimeout(timer);
       pendingClickCleanups.delete(cancel);
-      report(didRespond);
+      report(didRespond, navigationStalled);
     };
     const cancel = (): void => {
       if (finished) return;
@@ -1842,7 +2098,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
     const observer = new MutationObserver(() => {
       mutated = true;
-      if (extended) finish(true);
+      finish(true);
     });
     observer.observe(document.body, {
       attributes: true,
@@ -1870,10 +2126,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       // the navigation-specific deadline so genuine stalled routers still
       // surface without misclassifying an in-flight dynamic import as dead.
       extended = true;
-      timer = window.setTimeout(
-        () => finish(responded()),
-        navigationResponseMs - DEAD_CLICK_WINDOW_MS,
-      );
+      timer = window.setTimeout(() => {
+        const didRespond = responded();
+        finish(didRespond, !didRespond);
+      }, navigationResponseMs - DEAD_CLICK_WINDOW_MS);
     }, DEAD_CLICK_WINDOW_MS);
   };
 
@@ -1994,6 +2250,60 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
   if (
     signals !== null &&
+    signals.browserPolicyViolations !== false &&
+    typeof ReportingObserver !== "undefined"
+  ) {
+    try {
+      const reportTypes = [
+        "deprecation",
+        "permissions-policy-violation",
+        "integrity-violation",
+        "coep",
+      ];
+      const reported = new Set<string>();
+      const observer = new ReportingObserver(
+        (reports) => {
+          for (const report of reports) {
+            const body = report.body as unknown as {
+              id?: unknown;
+              sourceFile?: unknown;
+              lineNumber?: unknown;
+            };
+            const id =
+              typeof body.id === "string" && body.id !== ""
+                ? body.id.slice(0, SIGNAL_TEXT_MAX)
+                : report.type;
+            const key = `${report.type}|${id}|${shortUrl(report.url || location.href)}`;
+            if (reported.has(key)) continue;
+            reported.add(key);
+            emitSignal(
+              `Browser policy violation — ${report.type} ${id} — ${shortUrl(location.href)}`,
+              {
+                policyId: id,
+                reportType: report.type,
+                reportUrl: report.url || location.href,
+                signal: BEACON_SIGNAL.BROWSER_POLICY_VIOLATION,
+                ...(typeof body.sourceFile === "string"
+                  ? { sourceFile: body.sourceFile }
+                  : {}),
+                ...(typeof body.lineNumber === "number"
+                  ? { sourceLine: String(body.lineNumber) }
+                  : {}),
+              },
+            );
+          }
+        },
+        { buffered: true, types: reportTypes },
+      );
+      observer.observe();
+      cleanups.push(() => observer.disconnect());
+    } catch {
+      // Policy report types are experimental and independently implemented.
+    }
+  }
+
+  if (
+    signals !== null &&
     signals.mainThreadStalls !== false &&
     typeof PerformanceObserver !== "undefined"
   ) {
@@ -2014,12 +2324,40 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           stallTimes.push(now);
           if (stallTimes.length < stallCount) continue;
           reported = true;
+          const animationFrame = entry as PerformanceEntry & {
+            blockingDuration?: number;
+            scripts?: Array<{
+              duration?: number;
+              functionName?: string;
+              invoker?: string;
+              sourceURL?: string;
+            }>;
+          };
+          const script = [...(animationFrame.scripts ?? [])].sort(
+            (left, right) => (right.duration ?? 0) - (left.duration ?? 0),
+          )[0];
           emitSignal(
             `Main-thread stall — repeated long frames blocked the page — ${shortUrl(location.href)}`,
             {
+              ...(animationFrame.blockingDuration === undefined
+                ? {}
+                : {
+                    blockingDurationMs: String(
+                      Math.round(animationFrame.blockingDuration),
+                    ),
+                  }),
               durationMs: String(Math.round(entry.duration)),
               entryType: entry.entryType,
               signal: BEACON_SIGNAL.MAIN_THREAD_STALL,
+              ...(script?.functionName === undefined
+                ? {}
+                : { scriptFunction: script.functionName }),
+              ...(script?.invoker === undefined
+                ? {}
+                : { scriptInvoker: script.invoker }),
+              ...(script?.sourceURL === undefined
+                ? {}
+                : { scriptSource: shortUrl(script.sourceURL) }),
               stallCount: String(stallTimes.length),
               windowMs: String(stallWindowMs),
             },
@@ -2049,6 +2387,116 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
   }
 
+  if (signals !== null && typeof document !== "undefined") {
+    const discardedDocument = document as Document & { wasDiscarded?: boolean };
+    if (
+      signals.documentDiscards !== false &&
+      discardedDocument.wasDiscarded === true
+    ) {
+      emitSignal(
+        `Document discarded — the browser reloaded a discarded tab — ${shortUrl(location.href)}`,
+        { signal: BEACON_SIGNAL.DOCUMENT_DISCARDED },
+      );
+    }
+
+    if (signals.bfcacheBlocks !== false && typeof performance !== "undefined") {
+      const navigation = performance.getEntriesByType("navigation")[0] as
+        | (PerformanceNavigationTiming & {
+            notRestoredReasons?: {
+              children?: unknown[];
+              reasons?: Array<{ reason?: string }>;
+            } | null;
+          })
+        | undefined;
+      if (
+        navigation?.type === "back_forward" &&
+        navigation.notRestoredReasons != null
+      ) {
+        const reasons = new Set<string>();
+        const visit = (node: unknown): void => {
+          if (node === null || typeof node !== "object") return;
+          const detail = node as {
+            children?: unknown[];
+            reasons?: Array<{ reason?: unknown }>;
+          };
+          for (const reason of detail.reasons ?? []) {
+            if (typeof reason.reason === "string") reasons.add(reason.reason);
+          }
+          for (const child of detail.children ?? []) visit(child);
+        };
+        visit(navigation.notRestoredReasons);
+        const reasonList = [...reasons].slice(0, 10);
+        emitSignal(
+          `Back-forward cache blocked — ${reasonList.join(", ") || "unknown reason"} — ${shortUrl(location.href)}`,
+          {
+            reasons: reasonList.join(",") || "unknown",
+            signal: BEACON_SIGNAL.BFCACHE_BLOCKED,
+          },
+        );
+      }
+    }
+  }
+
+  if (instrument.networkChanges !== false && typeof navigator !== "undefined") {
+    const connection = (
+      navigator as Navigator & {
+        connection?: EventTarget & {
+          downlink?: number;
+          effectiveType?: string;
+          rtt?: number;
+          saveData?: boolean;
+        };
+      }
+    ).connection;
+    if (connection !== undefined) {
+      const onConnectionChange = (): void => {
+        addBreadcrumb({
+          data: {
+            ...(typeof connection.downlink === "number"
+              ? { downlink: connection.downlink }
+              : {}),
+            ...(typeof connection.effectiveType === "string"
+              ? { effectiveType: connection.effectiveType }
+              : {}),
+            ...(typeof connection.rtt === "number"
+              ? { rtt: connection.rtt }
+              : {}),
+            ...(typeof connection.saveData === "boolean"
+              ? { saveData: connection.saveData }
+              : {}),
+          },
+          message: "Network quality changed",
+          type: "custom",
+        });
+      };
+      connection.addEventListener("change", onConnectionChange);
+      cleanups.push(() =>
+        connection.removeEventListener("change", onConnectionChange),
+      );
+    }
+  }
+
+  if (
+    instrument.userTiming === true &&
+    typeof PerformanceObserver !== "undefined"
+  ) {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          addBreadcrumb({
+            data: { durationMs: Math.round(entry.duration) },
+            message: `Performance measure ${entry.name.slice(0, SIGNAL_TEXT_MAX)}`,
+            type: "custom",
+          });
+        }
+      });
+      observer.observe({ buffered: true, type: "measure" });
+      cleanups.push(() => observer.disconnect());
+    } catch {
+      // User Timing observation is optional in older browsers.
+    }
+  }
+
   if (instrument.globalErrors !== false) {
     const onError = (event: Event): void => {
       if (event instanceof ErrorEvent) {
@@ -2065,6 +2513,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           level: "error",
           tags: errorEventTags(event),
         });
+        reportErrorClick?.(error.name);
         return;
       }
 
@@ -2120,6 +2569,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const reason = event.reason;
       if (reason instanceof Error) {
         captureException(reason, { level: "error" });
+        reportErrorClick?.(reason.name);
         return;
       }
       if (
@@ -2143,6 +2593,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         },
         level: "error",
       });
+      reportErrorClick?.("UnhandledRejection");
     };
     window.addEventListener("unhandledrejection", onRejection);
     cleanups.push(() =>
@@ -2179,6 +2630,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               wrappedConsole,
               2,
             );
+          if (text !== "") reportErrorClick?.("ConsoleError");
           inSignalConsole = false;
         }
         original.apply(console, args);
@@ -2267,8 +2719,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const onClick = (event: Event): void => {
       const target = event.target;
       if (!(target instanceof Element)) return;
-      addBreadcrumb({ message: describeElement(target), type: "click" });
+      const targetName = describeElement(target);
+      beginAction("click", targetName);
+      addBreadcrumb({ message: targetName, type: "click" });
       if (signals === null) return;
+      recentInteraction = {
+        at: Date.now(),
+        target: targetName,
+        type: "click",
+      };
       const control = deadClickCandidate(target, event);
       if (control === null) return;
       const detectRage =
@@ -2278,12 +2737,26 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const clickedAt = Date.now();
       const x = event instanceof MouseEvent ? event.clientX : 0;
       const y = event instanceof MouseEvent ? event.clientY : 0;
-      observeClickResponse(control, event, (responded) => {
+      observeClickResponse(control, event, (responded, navigationStalled) => {
         if (responded) {
           // A response between repeated clicks breaks the rage sequence.
           unresponsiveClicks = unresponsiveClicks.filter(
             (click) => click.control !== control,
           );
+          return;
+        }
+        if (navigationStalled && signals.stalledNavigations !== false) {
+          emitSignal(
+            clickSignalMessage(
+              "Navigation stalled — accepted route never settled",
+              control,
+            ),
+            {
+              signal: BEACON_SIGNAL.NAVIGATION_STALLED,
+              target: describeElement(control),
+            },
+          );
+
           return;
         }
         if (detectDead) {
@@ -2320,7 +2793,35 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       });
     };
     document.addEventListener("click", onClick, true);
-    cleanups.push(() => document.removeEventListener("click", onClick, true));
+    const onInteractionSubmit = (event: Event): void => {
+      if (!(event.target instanceof HTMLFormElement)) return;
+      const target = describeElement(event.target);
+      beginAction("submit", target);
+      recentInteraction = {
+        at: Date.now(),
+        target,
+        type: "submit",
+      };
+    };
+    const onInteractionKey = (event: KeyboardEvent): void => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const targetName = describeElement(target);
+      beginAction("keyboard", targetName);
+      recentInteraction = {
+        at: Date.now(),
+        target: targetName,
+        type: "keyboard",
+      };
+    };
+    document.addEventListener("submit", onInteractionSubmit, true);
+    document.addEventListener("keydown", onInteractionKey, true);
+    cleanups.push(() => {
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("submit", onInteractionSubmit, true);
+      document.removeEventListener("keydown", onInteractionKey, true);
+    });
   }
 
   // ——— Settled-scan watchdogs ———————————————————————————————————————————
@@ -2356,6 +2857,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const detectInvisibleText = signals.invisibleText !== false;
     const detectStuckLoading = signals.stuckLoading !== false;
     const detectThemeMismatch = signals.themeMismatches !== false;
+    const detectBlankAppRoot = signals.blankAppRoots !== false;
     const overflowSettleMs =
       signals.layoutOverflowSettleMs ?? LAYOUT_OVERFLOW_SETTLE_DEFAULT_MS;
     const overflowMaxReports =
@@ -2910,6 +3412,36 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       }
     };
 
+    const checkBlankAppRoots = (): void => {
+      if (document.visibilityState === "hidden") return;
+      const roots = document.querySelectorAll(`[${BEACON_ATTRIBUTE.APP_ROOT}]`);
+      for (const root of Array.from(roots)) {
+        if (isScanExempt(root)) continue;
+        const rect = root.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const text = (root.textContent ?? "").trim();
+        const meaningful =
+          text !== "" ||
+          root.querySelector(
+            "button, input, select, textarea, img, svg, canvas, video, iframe, [role=alert]",
+          ) !== null;
+        const loading =
+          root.querySelector(
+            `[aria-busy="true"], [role="progressbar"], [${BEACON_ATTRIBUTE.LOADING}]`,
+          ) !== null;
+        if (meaningful || loading) continue;
+        const name =
+          root.getAttribute(BEACON_ATTRIBUTE.APP_ROOT)?.trim() ||
+          describeElement(root);
+        reportScanIssue(
+          root,
+          BEACON_SIGNAL.BLANK_APP_ROOT,
+          `Blank application root — ${name} rendered no meaningful content`,
+          {},
+        );
+      }
+    };
+
     const runSettledScan = (): void => {
       if (detectOverflow) scanForOverflow();
       if (detectOcclusion) scanForOcclusion();
@@ -2950,6 +3482,140 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const stuckTimer = setInterval(checkStuckLoading, STUCK_LOADING_POLL_MS);
       (stuckTimer as { unref?: () => void }).unref?.();
       cleanups.push(() => clearInterval(stuckTimer));
+    }
+    if (detectBlankAppRoot) {
+      const blankTimer = setTimeout(
+        checkBlankAppRoots,
+        signals.blankAppRootSettleMs ?? BLANK_APP_ROOT_SETTLE_DEFAULT_MS,
+      );
+      cleanups.push(() => clearTimeout(blankTimer));
+    }
+  }
+
+  if (
+    signals !== null &&
+    signals.disruptiveLayoutShifts !== false &&
+    typeof PerformanceObserver !== "undefined"
+  ) {
+    const minimum =
+      signals.disruptiveLayoutShiftMin ?? DISRUPTIVE_LAYOUT_SHIFT_DEFAULT_MIN;
+    const reported = new Set<string>();
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const raw of list.getEntries()) {
+          const entry = raw as PerformanceEntry & {
+            hadRecentInput?: boolean;
+            sources?: Array<{ node?: Node | null }>;
+            value?: number;
+          };
+          if (entry.hadRecentInput === true || (entry.value ?? 0) < minimum)
+            continue;
+          const targets = (entry.sources ?? [])
+            .map(({ node }) =>
+              node instanceof Element ? describeElement(node) : undefined,
+            )
+            .filter((target): target is string => target !== undefined)
+            .slice(0, 5);
+          const key = targets.join(",") || "unknown";
+          if (reported.has(key)) continue;
+          reported.add(key);
+          emitSignal(
+            `Disruptive layout shift — ${key} — ${shortUrl(location.href)}`,
+            {
+              shiftValue: String(entry.value ?? 0),
+              signal: BEACON_SIGNAL.DISRUPTIVE_LAYOUT_SHIFT,
+              target: key,
+            },
+          );
+        }
+      });
+      observer.observe({ buffered: true, type: "layout-shift" });
+      cleanups.push(() => observer.disconnect());
+    } catch {
+      // Layout Instability API unsupported.
+    }
+  }
+
+  if (
+    signals !== null &&
+    signals.slowInteractions !== false &&
+    typeof PerformanceObserver !== "undefined"
+  ) {
+    const minimum = signals.slowInteractionMs ?? SLOW_INTERACTION_DEFAULT_MS;
+    const reported = new Set<number | string>();
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const raw of list.getEntries()) {
+          const entry = raw as PerformanceEntry & {
+            interactionId?: number;
+            target?: Node | null;
+          };
+          if (entry.duration < minimum) continue;
+          const target =
+            entry.target instanceof Element
+              ? describeElement(entry.target)
+              : "unknown";
+          const key = entry.interactionId ?? `${entry.name}|${target}`;
+          if (reported.has(key)) continue;
+          reported.add(key);
+          emitSignal(
+            `Slow interaction — ${entry.name} blocked for ${Math.round(entry.duration)}ms — ${shortUrl(location.href)}`,
+            {
+              durationMs: String(Math.round(entry.duration)),
+              eventType: entry.name,
+              ...(entry.interactionId === undefined
+                ? {}
+                : { interactionId: String(entry.interactionId) }),
+              signal: BEACON_SIGNAL.SLOW_INTERACTION,
+              target,
+            },
+          );
+        }
+      });
+      observer.observe({
+        buffered: true,
+        durationThreshold: Math.max(16, Math.min(1040, minimum)),
+        type: "event",
+      });
+      cleanups.push(() => observer.disconnect());
+    } catch {
+      // Event Timing API unsupported.
+    }
+  }
+
+  if (
+    signals !== null &&
+    signals.slowResources !== false &&
+    typeof PerformanceObserver !== "undefined"
+  ) {
+    const minimum = signals.slowResourceMs ?? SLOW_RESOURCE_DEFAULT_MS;
+    const reported = new Set<string>();
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const raw of list.getEntries()) {
+          const entry = raw as PerformanceResourceTiming;
+          if (entry.duration < minimum) continue;
+          if (!/^(css|font|img|link|script)$/u.test(entry.initiatorType))
+            continue;
+          const resource = shortUrl(entry.name);
+          const key = `${entry.initiatorType}|${resource}`;
+          if (reported.has(key)) continue;
+          reported.add(key);
+          emitSignal(`Slow resource — ${entry.initiatorType} ${resource}`, {
+            cacheHit: String(entry.transferSize === 0),
+            durationMs: String(Math.round(entry.duration)),
+            initiatorType: entry.initiatorType,
+            protocol: entry.nextHopProtocol || "unknown",
+            signal: BEACON_SIGNAL.SLOW_RESOURCE,
+            target: resource,
+            transferSize: String(entry.transferSize),
+          });
+        }
+      });
+      observer.observe({ buffered: true, type: "resource" });
+      cleanups.push(() => observer.disconnect());
+    } catch {
+      // Resource Timing observer unsupported.
     }
   }
 
@@ -3052,6 +3718,209 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       observer.disconnect();
       for (const frame of Array.from(watched.keys())) stopWatching(frame);
     });
+  }
+
+  if (
+    signals !== null &&
+    signals.mediaFailures !== false &&
+    typeof document !== "undefined"
+  ) {
+    const stallMs = signals.mediaStallMs ?? MEDIA_STALL_DEFAULT_MS;
+    const watched = new Map<
+      HTMLMediaElement,
+      { cleanup: () => void; stallTimer?: ReturnType<typeof setTimeout> }
+    >();
+    const watch = (media: HTMLMediaElement): void => {
+      if (watched.has(media) || !media.hasAttribute(BEACON_ATTRIBUTE.MEDIA))
+        return;
+      const name =
+        media.getAttribute(BEACON_ATTRIBUTE.MEDIA)?.trim() ||
+        describeElement(media);
+      let started = false;
+      let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearStall = (): void => {
+        if (stallTimer !== undefined) clearTimeout(stallTimer);
+        stallTimer = undefined;
+      };
+      const onPlay = (): void => {
+        started = true;
+        clearStall();
+      };
+      const onWaiting = (): void => {
+        if (!started || media.ended || media.paused) return;
+        clearStall();
+        stallTimer = setTimeout(() => {
+          if (!media.isConnected || media.ended || media.paused) return;
+          emitSignal(
+            `Media playback stalled — ${name} — ${shortUrl(location.href)}`,
+            {
+              currentTime: String(Math.round(media.currentTime)),
+              networkState: String(media.networkState),
+              readyState: String(media.readyState),
+              signal: BEACON_SIGNAL.MEDIA_PLAYBACK_STALLED,
+              target: name,
+            },
+          );
+        }, stallMs);
+      };
+      const onError = (): void => {
+        const error = media.error;
+        emitSignal(
+          `Media playback failed — ${name} — ${shortUrl(location.href)}`,
+          {
+            errorCode: String(error?.code ?? 0),
+            networkState: String(media.networkState),
+            signal: BEACON_SIGNAL.MEDIA_PLAYBACK_FAILED,
+            target: name,
+          },
+        );
+      };
+      media.addEventListener("playing", onPlay);
+      media.addEventListener("waiting", onWaiting);
+      media.addEventListener("stalled", onWaiting);
+      media.addEventListener("waitingforkey", onWaiting);
+      media.addEventListener("error", onError);
+      media.addEventListener("pause", clearStall);
+      media.addEventListener("ended", clearStall);
+      const cleanup = (): void => {
+        clearStall();
+        media.removeEventListener("playing", onPlay);
+        media.removeEventListener("waiting", onWaiting);
+        media.removeEventListener("stalled", onWaiting);
+        media.removeEventListener("waitingforkey", onWaiting);
+        media.removeEventListener("error", onError);
+        media.removeEventListener("pause", clearStall);
+        media.removeEventListener("ended", clearStall);
+      };
+      watched.set(media, { cleanup, stallTimer });
+    };
+    const scan = (root: ParentNode): void => {
+      if (root instanceof HTMLMediaElement) watch(root);
+      for (const media of Array.from(
+        root.querySelectorAll?.(
+          `audio[${BEACON_ATTRIBUTE.MEDIA}], video[${BEACON_ATTRIBUTE.MEDIA}]`,
+        ) ?? [],
+      )) {
+        if (media instanceof HTMLMediaElement) watch(media);
+      }
+    };
+    scan(document);
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of Array.from(record.addedNodes)) {
+          if (node instanceof Element) scan(node);
+        }
+      }
+    });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+    cleanups.push(() => {
+      observer.disconnect();
+      for (const { cleanup } of watched.values()) cleanup();
+      watched.clear();
+    });
+  }
+
+  if (
+    signals !== null &&
+    signals.storageFailures !== false &&
+    typeof Storage !== "undefined"
+  ) {
+    const originalSetItem = Storage.prototype.setItem;
+    const wrappedSetItem = function (
+      this: Storage,
+      key: string,
+      value: string,
+    ): void {
+      try {
+        originalSetItem.call(this, key, value);
+      } catch (error) {
+        const resolved = toError(error);
+        emitSignal(
+          `Browser storage failure — ${resolved.name} — ${shortUrl(location.href)}`,
+          {
+            errorName: resolved.name,
+            signal: BEACON_SIGNAL.STORAGE_FAILURE,
+            storage: this === localStorage ? "localStorage" : "sessionStorage",
+          },
+        );
+        throw error;
+      }
+    };
+    try {
+      Storage.prototype.setItem = wrappedSetItem;
+      cleanups.push(() => {
+        Storage.prototype.setItem = originalSetItem;
+      });
+    } catch {
+      // Storage prototype may be immutable in embedded browser hosts.
+    }
+  }
+
+  if (
+    signals !== null &&
+    signals.storageFailures !== false &&
+    typeof indexedDB !== "undefined"
+  ) {
+    const factory = indexedDB;
+    const originalOpen = factory.open.bind(factory);
+    const originalDeleteDatabase = factory.deleteDatabase.bind(factory);
+    const reported = new WeakSet<IDBRequest>();
+    const watch = <T extends IDBRequest>(
+      request: T,
+      operation: "open" | "delete",
+      database: string,
+    ): T => {
+      request.addEventListener(
+        "error",
+        () => {
+          if (reported.has(request)) return;
+          reported.add(request);
+          const error = request.error;
+          emitSignal(
+            `IndexedDB ${operation} failure — ${error?.name ?? "UnknownError"} — ${shortUrl(location.href)}`,
+            {
+              database: database.slice(0, SIGNAL_TEXT_MAX),
+              errorName: error?.name ?? "UnknownError",
+              operation,
+              signal: BEACON_SIGNAL.STORAGE_FAILURE,
+              storage: "indexedDB",
+            },
+          );
+        },
+        { once: true },
+      );
+
+      return request;
+    };
+    const wrappedOpen = ((name: string, version?: number) =>
+      watch(
+        version === undefined
+          ? originalOpen(name)
+          : originalOpen(name, version),
+        "open",
+        name,
+      )) as IDBFactory["open"];
+    const wrappedDeleteDatabase = ((name: string) =>
+      watch(
+        originalDeleteDatabase(name),
+        "delete",
+        name,
+      )) as IDBFactory["deleteDatabase"];
+    try {
+      factory.open = wrappedOpen;
+      factory.deleteDatabase = wrappedDeleteDatabase;
+      cleanups.push(() => {
+        if (factory.open === wrappedOpen) factory.open = originalOpen;
+        if (factory.deleteDatabase === wrappedDeleteDatabase) {
+          factory.deleteDatabase = originalDeleteDatabase;
+        }
+      });
+    } catch {
+      // Some browsers expose a non-writable IDBFactory instance.
+    }
   }
 
   if (
@@ -3258,6 +4127,58 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       };
       document.addEventListener("wheel", onWheel, { passive: true });
       cleanups.push(() => document.removeEventListener("wheel", onWheel));
+    }
+
+    if (signals.thrashedCursors !== false) {
+      const reversalThreshold =
+        signals.thrashedCursorReversals ?? THRASHED_CURSOR_DEFAULT_REVERSALS;
+      let points: Array<{ at: number; dx: number; dy: number }> = [];
+      let previous: { x: number; y: number } | undefined;
+      let reported = false;
+      const onPointerMove = (event: PointerEvent): void => {
+        if (reported || event.pointerType === "touch") return;
+        if (previous === undefined) {
+          previous = { x: event.clientX, y: event.clientY };
+
+          return;
+        }
+        const dx = event.clientX - previous.x;
+        const dy = event.clientY - previous.y;
+        previous = { x: event.clientX, y: event.clientY };
+        if (Math.hypot(dx, dy) < 8) return;
+        const now = Date.now();
+        points = points.filter(
+          (point) => now - point.at < THRASHED_CURSOR_WINDOW_MS,
+        );
+        points.push({ at: now, dx, dy });
+        let reversals = 0;
+        for (let index = 1; index < points.length; index += 1) {
+          const prior = points[index - 1]!;
+          const current = points[index]!;
+          if (prior.dx * current.dx < 0 || prior.dy * current.dy < 0)
+            reversals += 1;
+        }
+        if (reversals < reversalThreshold) return;
+        reported = true;
+        const target =
+          event.target instanceof Element
+            ? describeElement(event.target)
+            : "document";
+        emitSignal(
+          `Thrashed cursor — repeated direction changes — ${shortUrl(location.href)}`,
+          {
+            reversals: String(reversals),
+            signal: BEACON_SIGNAL.THRASHED_CURSOR,
+            target,
+          },
+        );
+      };
+      document.addEventListener("pointermove", onPointerMove, {
+        passive: true,
+      });
+      cleanups.push(() =>
+        document.removeEventListener("pointermove", onPointerMove),
+      );
     }
 
     // Dialog focus: report both focus dropped after unmount and focus escaping
@@ -3486,6 +4407,55 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       cleanups.push(() => {
         document.removeEventListener("submit", onSubmit, true);
         document.removeEventListener("invalid", onInvalid, true);
+      });
+    }
+
+    if (signals.formAbandonment !== false) {
+      const dirtyForms = new Set<HTMLFormElement>();
+      const submittedForms = new WeakSet<HTMLFormElement>();
+      const onInput = (event: Event): void => {
+        const target = event.target;
+        const form =
+          target instanceof HTMLInputElement ||
+          target instanceof HTMLSelectElement ||
+          target instanceof HTMLTextAreaElement
+            ? target.form
+            : null;
+        if (form?.hasAttribute(BEACON_ATTRIBUTE.FORM) === true) {
+          dirtyForms.add(form);
+        }
+      };
+      const onSubmit = (event: Event): void => {
+        if (!(event.target instanceof HTMLFormElement)) return;
+        submittedForms.add(event.target);
+        dirtyForms.delete(event.target);
+      };
+      const report = (): void => {
+        for (const form of dirtyForms) {
+          if (!form.isConnected || submittedForms.has(form)) continue;
+          const name =
+            form.getAttribute(BEACON_ATTRIBUTE.FORM)?.trim() ||
+            describeElement(form);
+          emitSignal(
+            `Form abandonment — ${name} left dirty — ${shortUrl(location.href)}`,
+            {
+              fieldCount: String(form.elements.length),
+              signal: BEACON_SIGNAL.FORM_ABANDONMENT,
+              target: name,
+            },
+          );
+          dirtyForms.delete(form);
+        }
+      };
+      reportFormAbandonmentOnNavigation = report;
+      document.addEventListener("input", onInput, true);
+      document.addEventListener("submit", onSubmit, true);
+      window.addEventListener("pagehide", report);
+      cleanups.push(() => {
+        reportFormAbandonmentOnNavigation = null;
+        document.removeEventListener("input", onInput, true);
+        document.removeEventListener("submit", onSubmit, true);
+        window.removeEventListener("pagehide", report);
       });
     }
   }
@@ -4093,6 +5063,34 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     });
   }
 
+  const classifySemanticResponse = (
+    response: Response,
+    request: { method: string; url: string },
+  ): void => {
+    const classifier = instrument.classifyResponse;
+    if (classifier === undefined || !response.ok) return;
+    void Promise.resolve(classifier(response.clone(), request))
+      .then((result) => {
+        if (result === undefined || result === false) return;
+        captureException(
+          errorWithoutStack("SemanticResponseFailure", result.message),
+          {
+            groupingKey: result.groupingKey,
+            level: "warning",
+            tags: {
+              endpoint: shortUrl(request.url),
+              method: request.method.toUpperCase(),
+              signal: BEACON_SIGNAL.SEMANTIC_RESPONSE_FAILURE,
+              ...(result.tags ?? {}),
+            },
+          },
+        );
+      })
+      .catch(() => {
+        // The host classifier is diagnostic-only and cannot affect requests.
+      });
+  };
+
   if (instrument.fetch !== false && typeof window.fetch === "function") {
     const originalFetch = window.fetch;
     const wrapped = async (
@@ -4126,6 +5124,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           Date.now() - start,
           responseTraceId(response.headers.get(BEACON_TRACE_HEADER)),
         );
+        classifySemanticResponse(response, { method, url });
         return response;
       } catch (error) {
         const resolved = toError(error);
@@ -4217,6 +5216,32 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                 Date.now() - start,
                 responseTraceId(this.getResponseHeader(BEACON_TRACE_HEADER)),
               );
+              if (
+                instrument.classifyResponse !== undefined &&
+                this.status >= 200 &&
+                this.status < 300 &&
+                (this.responseType === "" || this.responseType === "text")
+              ) {
+                const headers = new Headers();
+                for (const line of this.getAllResponseHeaders().split(
+                  /\r?\n/u,
+                )) {
+                  const separator = line.indexOf(":");
+                  if (separator <= 0) continue;
+                  headers.append(
+                    line.slice(0, separator).trim(),
+                    line.slice(separator + 1).trim(),
+                  );
+                }
+                classifySemanticResponse(
+                  new Response(this.responseText, {
+                    headers,
+                    status: this.status,
+                    statusText: this.statusText,
+                  }),
+                  request,
+                );
+              }
             } else {
               const error = new Error(
                 outcome === "timeout"
@@ -4264,6 +5289,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const patch = (key: "pushState" | "replaceState"): (() => void) => {
       const original = history[key].bind(history);
       history[key] = (...args: Parameters<History["pushState"]>) => {
+        reportFormAbandonmentOnNavigation?.();
         const result = original(...args);
         record();
         return result;
@@ -4273,8 +5299,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       };
     };
     cleanups.push(patch("pushState"), patch("replaceState"));
-    window.addEventListener("popstate", record);
-    cleanups.push(() => window.removeEventListener("popstate", record));
+    const onPopState = (): void => {
+      reportFormAbandonmentOnNavigation?.();
+      record();
+    };
+    window.addEventListener("popstate", onPopState);
+    cleanups.push(() => window.removeEventListener("popstate", onPopState));
   }
 
   // Flush on a timer + when the page is hidden / unloaded (the reliable moment).
@@ -4317,6 +5347,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       await flush(true);
     },
     flush: () => flush(false),
+    observeCapability,
     setTags: (next) => {
       tags = { ...tags, ...next };
     },
@@ -4360,3 +5391,9 @@ export const addBreadcrumb = (crumb: {
   type?: Breadcrumb["type"];
   data?: Record<string, unknown>;
 }): void => current?.addBreadcrumb(crumb);
+
+/** Observe an application-owned browser capability against the global beacon. */
+export const observeCapability = <T>(
+  name: string,
+  operation: Promise<T>,
+): Promise<T> => current?.observeCapability(name, operation) ?? operation;

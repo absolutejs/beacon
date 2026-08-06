@@ -156,6 +156,20 @@ beacon.captureMessage("checkout started", "info");
   dedicated/shared worker construction, runtime, and message-decoding failures
   become replay-linked warnings. Normal socket closes, page teardown, hidden-tab
   SSE errors, and successfully replaced service workers are exempt.
+- **Attributed reliability signals** — Event Timing identifies genuinely slow
+  interactions (without treating an ordinary click timer as latency), Layout
+  Instability names shifted elements, and long animation frames include their
+  worst script when the browser exposes it. Successful HTTP responses can be
+  classified through the host-owned `instrument.classifyResponse` callback for
+  GraphQL-style errors without Beacon retaining response bodies.
+- **Lifecycle and platform gaps** — marked empty application roots, marked dirty
+  forms abandoned during navigation, marked media errors/stalls, Web Storage and
+  IndexedDB failures, discarded documents, bfcache rejection reasons, slow
+  static resources, policy reports, connection changes, and opt-in User Timing
+  measures are observable. `observeCapability(name, promise)` captures handled
+  browser-API rejection while preserving normal promise behavior. Crash reports
+  require the server-side Reporting API receiver in `@absolutejs/errors` because
+  the page cannot execute after its browser process crashes.
 
 ## API
 
@@ -169,6 +183,7 @@ captureException(error, { groupingKey?, level?, traceId?, spanId?, tags?, extra?
 captureMessage(message, level?, { groupingKey?, traceId?, spanId?, tags?, extra? })
 addBreadcrumb({ message, type?, data? })
 setTags(tags) · setUser(user | null)
+observeCapability(name, promise) => Promise
 flush() => Promise<void>          // buffered events out now
 close() => Promise<void>          // remove listeners + final flush
 
@@ -178,7 +193,8 @@ BEACON_SIGNAL.SLOW_RESPONSE
 BEACON_SIGNAL.HTTP_5XX
 BEACON_TRACE_HEADER // "x-absolute-trace-id"
 
-// Global helpers (no-op until initBeacon): captureException, captureMessage, addBreadcrumb
+// Global helpers (no-op until initBeacon): captureException, captureMessage,
+// addBreadcrumb, observeCapability
 ```
 
 SSR-safe: imported in a non-DOM environment, `createBeacon` returns a no-op.

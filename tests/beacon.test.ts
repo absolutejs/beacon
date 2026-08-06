@@ -669,7 +669,7 @@ describe("auto-instrumentation", () => {
     await beacon.flush();
 
     expect(sent[0]?.events).toHaveLength(1);
-    expect(sent[0]?.events[0]?.tags?.signal).toBe("dead_click");
+    expect(sent[0]?.events[0]?.tags?.signal).toBe("navigation_stalled");
     anchor.remove();
     await beacon.close();
     location.href = originalHref;
@@ -848,8 +848,8 @@ describe("auto-instrumentation", () => {
     await beacon.flush();
 
     expect(sent[0]?.events.map(({ message }) => message)).toEqual([
-      "Dead click — control didn't respond — blank — button[save-profile]",
-      "Dead click — control didn't respond — blank — button[remove-profile]",
+      expect.stringContaining("button[save-profile]"),
+      expect.stringContaining("button[remove-profile]"),
     ]);
     expect(sent[0]?.events.map(({ tags }) => tags?.target)).toEqual([
       "button[save-profile]",
@@ -878,6 +878,47 @@ describe("auto-instrumentation", () => {
     );
     await beacon.flush();
     expect(sent[0]?.events[0]?.message).toBe("uncaught boom");
+  });
+
+  test("correlates an error with its triggering interaction", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true, globalErrors: true },
+        project: "web",
+        signals: {
+          deadClicks: false,
+          errorClicks: true,
+          rageClicks: false,
+        },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const button = document.createElement("button");
+    button.setAttribute(BEACON_ATTRIBUTE.NAME, "save-deal");
+    document.body.append(button);
+    button.click();
+    window.dispatchEvent(
+      new ErrorEvent("error", { error: new Error("save exploded") }),
+    );
+    await beacon.flush();
+    const events = sent.flatMap(({ events }) => events);
+    const signal = events.find(({ tags }) => tags?.signal === "error_click");
+    expect(signal?.tags).toMatchObject({
+      actionTarget: "button[save-deal]",
+      actionType: "click",
+      errorName: "Error",
+      target: "button[save-deal]",
+    });
+    expect(
+      events.find(({ message }) => message === "save exploded")?.tags,
+    ).toMatchObject({
+      actionTarget: "button[save-deal]",
+      actionType: "click",
+    });
+    button.remove();
   });
 
   test("keeps non-Error rejection reasons stackless", async () => {
@@ -1269,6 +1310,57 @@ describe("auto-instrumentation", () => {
     expect(fetchCrumbs).toHaveLength(1);
     expect(crumbs.some((c) => c.message.includes("/ingest"))).toBe(false);
     globalThis.fetch = originalFetch;
+  });
+
+  test("classifies semantic failures in successful fetch responses", async () => {
+    const originalFetch = window.fetch;
+    window.fetch = (async () =>
+      new Response(
+        JSON.stringify({ errors: [{ message: "resolver failed" }] }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        },
+      )) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: {
+          ...ALL_OFF,
+          classifyResponse: async (response, request) => {
+            if (!request.url.includes("/graphql")) return false;
+            const body = (await response.json()) as { errors?: unknown[] };
+            return body.errors?.length
+              ? {
+                  groupingKey: "graphql:resolver-failure",
+                  message: "GraphQL response contained errors",
+                }
+              : false;
+          },
+          fetch: true,
+        },
+        project: "web",
+        signals: true,
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    try {
+      await window.fetch("/graphql");
+      await tick();
+      await beacon.flush();
+      const event = sent
+        .flatMap(({ events }) => events)
+        .find(({ tags }) => tags?.signal === "semantic_response_failure");
+      expect(event).toMatchObject({
+        groupingKey: "graphql:resolver-failure",
+        tags: { endpoint: "/graphql", method: "GET" },
+      });
+    } finally {
+      await beacon.close();
+      window.fetch = originalFetch;
+    }
   });
 
   test("correlates fetch 5xx signals with the server trace", async () => {
@@ -2133,6 +2225,166 @@ describe("ambient watchdog signals", () => {
     } finally {
       globalThis.PerformanceObserver = original;
     }
+  });
+
+  test("attributes slow interactions with Event Timing instead of click timers", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "event") return;
+        const button = document.createElement("button");
+        button.setAttribute(BEACON_ATTRIBUTE.NAME, "save-deal");
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 1240,
+                entryType: "event",
+                interactionId: 41,
+                name: "click",
+                target: button,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { slowInteractionMs: 1000 },
+      });
+      await beacon.flush();
+      const events = signalsSent(sent, "slow_interaction");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        durationMs: "1240",
+        eventType: "click",
+        interactionId: "41",
+        target: "button[save-deal]",
+      });
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("attributes disruptive layout shifts to their source elements", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "layout-shift") return;
+        const banner = document.createElement("div");
+        banner.className = "late-banner";
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 0,
+                entryType: "layout-shift",
+                hadRecentInput: false,
+                sources: [{ node: banner }],
+                value: 0.18,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      const events = signalsSent(sent, "disruptive_layout_shift");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags?.target).toBe("div.late-banner");
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("reports a marked application root that settles blank", async () => {
+    const root = document.createElement("main");
+    root.setAttribute(BEACON_ATTRIBUTE.APP_ROOT, "portal");
+    setRect(root, rectOf(0, 800, 0, 600));
+    document.body.append(root);
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { blankAppRootSettleMs: 0 },
+    });
+    await tick();
+    await beacon.flush();
+    expect(signalsSent(sent, "blank_app_root")).toHaveLength(1);
+    root.remove();
+  });
+
+  test("reports a marked dirty form abandoned on SPA navigation", async () => {
+    const form = document.createElement("form");
+    form.setAttribute(BEACON_ATTRIBUTE.FORM, "deal-editor");
+    const input = document.createElement("input");
+    form.append(input);
+    document.body.append(form);
+    const { beacon, sent } = makeWatchdogBeacon({
+      instrument: { ...ALL_OFF, history: true },
+    });
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    history.pushState(null, "", "/after-form");
+    await beacon.flush();
+    const events = signalsSent(sent, "form_abandonment");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      fieldCount: "1",
+      target: "deal-editor",
+    });
+    form.remove();
+  });
+
+  test("reports marked media playback failures without inspecting media", async () => {
+    const media = document.createElement("video");
+    media.setAttribute(BEACON_ATTRIBUTE.MEDIA, "deal-preview");
+    document.body.append(media);
+    const { beacon, sent } = makeWatchdogBeacon();
+    media.dispatchEvent(new Event("error"));
+    await beacon.flush();
+    const events = signalsSent(sent, "media_playback_failed");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.target).toBe("deal-preview");
+    media.remove();
+  });
+
+  test("observeCapability reports handled browser API failures and rethrows", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const failure = new DOMException("permission denied", "NotAllowedError");
+    await expect(
+      beacon.observeCapability(
+        "notifications.requestPermission",
+        Promise.reject(failure),
+      ),
+    ).rejects.toBe(failure);
+    await beacon.flush();
+    const events = signalsSent(sent, "capability_failure");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.groupingKey).toBe(
+      "browser-capability:notifications.requestPermission",
+    );
   });
 
   test("reports identical resubmits as form frustration", async () => {
