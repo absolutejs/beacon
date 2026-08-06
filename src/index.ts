@@ -2183,9 +2183,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     // — invisible text: WCAG relative-luminance math over composited
     //   backgrounds; anything we cannot be sure about (gradients, images,
     //   never-opaque stacks, unparsable colors) is skipped, not guessed.
-    const parseColor = (
-      value: string,
-    ): { r: number; g: number; b: number; a: number } | null => {
+    type ParsedColor = { r: number; g: number; b: number; a: number };
+    const clamp = (value: number, min: number, max: number): number =>
+      Math.min(Math.max(value, min), max);
+    const parseAlpha = (value: string | undefined): number => {
+      if (value === undefined) return 1;
+      const parsed = Number.parseFloat(value);
+
+      return clamp(value.endsWith("%") ? parsed / 100 : parsed, 0, 1);
+    };
+    const parseRgbColor = (value: string): ParsedColor | null => {
       const match =
         /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[\s,/]+([\d.]+))?\s*\)$/u.exec(
           value,
@@ -2199,6 +2206,47 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         r: Number(match[1]),
       };
     };
+    // Chromium preserves CSS Color 4 values such as Tailwind v4's oklch()
+    // palette in getComputedStyle(). Convert them to sRGB before contrast
+    // math; treating an unparsed opaque background as transparent makes the
+    // scanner walk to a white ancestor and report false white-on-white text.
+    const parseOklchColor = (value: string): ParsedColor | null => {
+      const match =
+        /^oklch\(\s*([\d.]+)(%)?\s+([\d.]+)\s+(-?[\d.]+)(?:deg)?(?:\s*\/\s*([\d.]+%?))?\s*\)$/u.exec(
+          value,
+        );
+      if (match === null) return null;
+      const lightness = Number(match[1]) / (match[2] === "%" ? 100 : 1);
+      const chroma = Number(match[3]);
+      const hue = (Number(match[4]) * Math.PI) / 180;
+      const a = chroma * Math.cos(hue);
+      const b = chroma * Math.sin(hue);
+      const lRoot = lightness + 0.3963377774 * a + 0.2158037573 * b;
+      const mRoot = lightness - 0.1055613458 * a - 0.0638541728 * b;
+      const sRoot = lightness - 0.0894841775 * a - 1.291485548 * b;
+      const l = lRoot ** 3;
+      const m = mRoot ** 3;
+      const s = sRoot ** 3;
+      const linearToSrgb = (channel: number): number => {
+        const encoded =
+          channel <= 0.0031308
+            ? 12.92 * channel
+            : 1.055 * channel ** (1 / 2.4) - 0.055;
+
+        return clamp(encoded, 0, 1) * 255;
+      };
+
+      return {
+        a: parseAlpha(match[5]),
+        b: linearToSrgb(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+        g: linearToSrgb(
+          -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        ),
+        r: linearToSrgb(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+      };
+    };
+    const parseColor = (value: string): ParsedColor | null =>
+      parseRgbColor(value) ?? parseOklchColor(value);
     const channelLuminance = (channel: number): number => {
       const scaled = channel / 255;
 

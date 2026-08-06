@@ -2126,6 +2126,40 @@ describe("ambient watchdog signals", () => {
     heading.remove();
     document.body.style.backgroundColor = "";
   });
+
+  test("parses Tailwind oklch backgrounds instead of using a white ancestor", async () => {
+    const button = document.createElement("button");
+    button.textContent = "Resolve";
+    button.style.color = "rgb(255, 255, 255)";
+    setRect(button, rectOf(0, 120, 0, 40));
+    document.body.style.backgroundColor = "rgb(255, 255, 255)";
+    document.body.append(button);
+    const originalGetComputedStyle = window.getComputedStyle;
+    window.getComputedStyle = ((element: Element): CSSStyleDeclaration => {
+      const style = originalGetComputedStyle.call(window, element);
+      if (element !== button) return style;
+
+      return new Proxy(style, {
+        get: (target, property) => {
+          if (property === "backgroundColor") {
+            return "oklch(0.627 0.194 149.214)";
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }) as typeof window.getComputedStyle;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await settle(beacon);
+      expect(signalsSent(sent, "invisible_text")).toHaveLength(0);
+    } finally {
+      window.getComputedStyle = originalGetComputedStyle;
+      button.remove();
+      document.body.style.backgroundColor = "";
+    }
+  });
 });
 
 describe("overlay awareness", () => {
