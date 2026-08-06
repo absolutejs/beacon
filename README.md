@@ -123,15 +123,24 @@ beacon.captureMessage("checkout started", "info");
   storms (one endpoint hammered in seconds), reload loops, stale releases (a
   service worker serving a build older than one this browser already ran),
   font-face load failures, focus dropped to `<body>` when a dialog unmounts,
-  and form frustration (identical resubmits / repeated native-validation
-  failures). Each is individually toggleable on `signals`, deduped, capped,
-  and exempts `data-beacon-scan="allow"` subtrees where a DOM scan is
-  involved.
+  focus escaping or never entering an explicit modal, browser interventions,
+  enforced CSP violations, repeated visible-page main-thread stalls, and form
+  frustration (identical resubmits / repeated native-validation failures).
+  Each is individually toggleable on `signals`, deduped, capped, and exempts
+  `data-beacon-scan="allow"` subtrees where a DOM scan is involved.
 - **Actionable network signals** — expected aborts remain breadcrumbs instead of
   issues; offline, timeout, isolated-endpoint, and multi-endpoint connectivity
-  failures are classified separately. Concurrent failures become one event with
-  every attempt, method, endpoint, duration, original error/stack, online state,
-  transport, and page visibility preserved in `extra.networkFailures`.
+  failures are classified separately. HTTP 429 responses and repeated 401/403
+  responses surface rate-limit and authorization storms without treating one
+  ordinary authorization rejection as an issue. Concurrent failures become one
+  event with every attempt, method, endpoint, duration, original error/stack,
+  online state, transport, and page visibility preserved in
+  `extra.networkFailures`.
+- **Runtime boundary signals** — abnormal WebSocket closes, WebSocket and SSE
+  reconnect flapping, handled service-worker registration/install failures, and
+  dedicated/shared worker construction, runtime, and message-decoding failures
+  become replay-linked warnings. Normal socket closes, page teardown, hidden-tab
+  SSE errors, and successfully replaced service workers are exempt.
 
 ## API
 
@@ -148,7 +157,7 @@ setTags(tags) · setUser(user | null)
 flush() => Promise<void>          // buffered events out now
 close() => Promise<void>          // remove listeners + final flush
 
-// Typed names for event.tags.signal in beforeSend policies:
+// Typed names for event.tags.signal in beforeSend policies (all built-ins):
 BEACON_SIGNAL.FETCH_FAILED
 BEACON_SIGNAL.SLOW_RESPONSE
 BEACON_SIGNAL.HTTP_5XX

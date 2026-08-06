@@ -1340,6 +1340,72 @@ describe("auto-instrumentation", () => {
     globalThis.fetch = originalFetch;
   });
 
+  test("reports HTTP 429 responses as rate limiting", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(null, { status: 429 })) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { rateLimits: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await fetch("/v1/search", { method: "POST" });
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]).toMatchObject({
+      message: "Rate limited — POST /v1/search returned 429",
+      tags: {
+        endpoint: "/v1/search",
+        method: "POST",
+        signal: "rate_limited",
+        status: "429",
+      },
+    });
+    globalThis.fetch = originalFetch;
+  });
+
+  test("reports repeated authorization failures without flagging one rejection", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(null, { status: 401 })) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { authFailureStormCount: 3 },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+
+    await fetch("/v1/session");
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+    await fetch("/v1/session");
+    await fetch("/v1/session");
+    await beacon.flush();
+
+    expect(sent[0]?.events[0]).toMatchObject({
+      tags: {
+        endpoint: "/v1/session",
+        failureCount: "3",
+        method: "GET",
+        signal: "auth_failure_storm",
+        statuses: "401",
+      },
+    });
+    globalThis.fetch = originalFetch;
+  });
+
   test("preserves actionable context for an isolated fetch failure", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => {
@@ -1930,6 +1996,145 @@ describe("ambient watchdog signals", () => {
     expect(signalsSent(sent, "focus_lost")).toHaveLength(1);
   });
 
+  test("reports a modal that never receives initial focus", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const { beacon, sent } = makeWatchdogBeacon();
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("role", "dialog");
+    const close = document.createElement("button");
+    modal.append(close);
+    document.body.append(modal);
+    await new Promise((resolve) => setTimeout(resolve, 130));
+    await beacon.flush();
+    const events = signalsSent(sent, "modal_focus_escape");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.reason).toBe("initial-focus-missing");
+    modal.remove();
+    opener.remove();
+  });
+
+  test("reports enforced CSP violations without reporting report-only policy", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const reportOnly = new Event("securitypolicyviolation");
+    Object.defineProperties(reportOnly, {
+      blockedURI: { value: "https://cdn.test/report.js?token=secret" },
+      disposition: { value: "report" },
+      effectiveDirective: { value: "script-src-elem" },
+      lineNumber: { value: 0 },
+      sourceFile: { value: "" },
+      violatedDirective: { value: "script-src" },
+    });
+    document.dispatchEvent(reportOnly);
+    const enforced = new Event("securitypolicyviolation");
+    Object.defineProperties(enforced, {
+      blockedURI: { value: "https://cdn.test/app.js?token=secret" },
+      disposition: { value: "enforce" },
+      effectiveDirective: { value: "script-src-elem" },
+      lineNumber: { value: 12 },
+      sourceFile: { value: "https://app.test/index.js?secret=yes" },
+      violatedDirective: { value: "script-src" },
+    });
+    document.dispatchEvent(enforced);
+    await beacon.flush();
+    const events = signalsSent(sent, "csp_violation");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      blockedUri: "https://cdn.test/app.js",
+      directive: "script-src-elem",
+      disposition: "enforce",
+      sourceFile: "https://app.test/index.js",
+      sourceLine: "12",
+    });
+  });
+
+  test("reports browser interventions from ReportingObserver", async () => {
+    const original = globalThis.ReportingObserver;
+    class FakeReportingObserver {
+      private readonly callback: ReportingObserverCallback;
+      constructor(callback: ReportingObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(): void {
+        this.callback(
+          [
+            {
+              body: {
+                id: "HeavyAdIntervention",
+                lineNumber: 9,
+                message: "An operation was blocked",
+                sourceFile: "https://app.test/ad.js",
+              },
+              type: "intervention",
+              url: "https://app.test/portal",
+            } as unknown as Report,
+          ],
+          this as unknown as ReportingObserver,
+        );
+      }
+      takeRecords(): ReportList {
+        return [];
+      }
+    }
+    globalThis.ReportingObserver =
+      FakeReportingObserver as unknown as typeof ReportingObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      const events = signalsSent(sent, "browser_intervention");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags?.interventionId).toBe("HeavyAdIntervention");
+    } finally {
+      globalThis.ReportingObserver = original;
+    }
+  });
+
+  test("reports repeated visible main-thread stalls", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(): void {
+        this.callback(
+          {
+            getEntries: () =>
+              [210, 240, 280].map(
+                (duration) =>
+                  ({
+                    duration,
+                    entryType: "long-animation-frame",
+                  }) as PerformanceEntry,
+              ),
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      const events = signalsSent(sent, "main_thread_stall");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        entryType: "long-animation-frame",
+        stallCount: "3",
+      });
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
   test("reports identical resubmits as form frustration", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const form = document.createElement("form");
@@ -1977,6 +2182,43 @@ describe("ambient watchdog signals", () => {
     window.EventSource = original;
   });
 
+  test("reports repeated EventSource reconnect failures as flapping", async () => {
+    class FakeEventSource extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSED = 2;
+      readyState = 0;
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+    }
+    const original = window.EventSource;
+    window.EventSource = FakeEventSource as unknown as typeof EventSource;
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: {
+        layoutOverflowSettleMs: 0,
+        sseFlapCount: 3,
+        stalledStreams: false,
+      },
+    });
+    const source = new window.EventSource("https://app.test/stream/updates");
+    source.dispatchEvent(new Event("error"));
+    source.dispatchEvent(new Event("error"));
+    source.dispatchEvent(new Event("error"));
+    await beacon.flush();
+    const events = signalsSent(sent, "sse_flapping");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.errorCount).toBe("3");
+    source.close();
+    await beacon.close();
+    window.EventSource = original;
+  });
+
   test("reports websocket connect/close churn as flapping", async () => {
     class FakeWebSocket extends EventTarget {
       url: string;
@@ -2001,6 +2243,202 @@ describe("ambient watchdog signals", () => {
     expect(events[0]?.tags?.endpoint).toBe("/sync/ws");
     await beacon.close();
     window.WebSocket = original;
+  });
+
+  test("reports an abnormal WebSocket close with its close code", async () => {
+    class FakeWebSocket extends EventTarget {
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+    }
+    const original = window.WebSocket;
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, socketFlapping: false },
+    });
+    const normalSocket = new window.WebSocket("wss://app.test/sync/ws");
+    normalSocket.dispatchEvent(
+      new CloseEvent("close", { code: 1000, wasClean: true }),
+    );
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+    const socket = new window.WebSocket("wss://app.test/sync/ws");
+    socket.dispatchEvent(
+      new CloseEvent("close", { code: 1006, wasClean: false }),
+    );
+    await beacon.flush();
+    const events = signalsSent(sent, "socket_abnormal_close");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      closeCode: "1006",
+      endpoint: "/sync/ws",
+      wasClean: "false",
+    });
+    await beacon.close();
+    window.WebSocket = original;
+  });
+
+  test("reports dedicated worker runtime failures", async () => {
+    class FakeWorker extends EventTarget {
+      constructor(_url: string | URL) {
+        super();
+      }
+      postMessage(): void {}
+      terminate(): void {}
+    }
+    const original = window.Worker;
+    const fakeWorkerConstructor = FakeWorker as unknown as typeof Worker;
+    window.Worker = fakeWorkerConstructor;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const worker = new window.Worker("/workers/search.js");
+      worker.dispatchEvent(
+        new ErrorEvent("error", {
+          filename: "https://app.test/workers/search.js",
+          lineno: 14,
+          message: "worker exploded",
+        }),
+      );
+      await beacon.flush();
+      const events = signalsSent(sent, "worker_failure");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        endpoint: "/workers/search.js",
+        failureKind: "error",
+        workerType: "dedicated",
+      });
+      await beacon.close();
+      expect(window.Worker).toBe(fakeWorkerConstructor);
+    } finally {
+      window.Worker = original;
+    }
+  });
+
+  test("reports shared-worker message decoding failures", async () => {
+    class FakeMessagePort extends EventTarget {
+      close(): void {}
+      postMessage(): void {}
+      start(): void {}
+    }
+    class FakeSharedWorker extends EventTarget {
+      readonly port = new FakeMessagePort();
+      constructor(_url: string | URL) {
+        super();
+      }
+    }
+    const original = window.SharedWorker;
+    const fakeSharedWorkerConstructor =
+      FakeSharedWorker as unknown as typeof SharedWorker;
+    window.SharedWorker = fakeSharedWorkerConstructor;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const worker = new window.SharedWorker("/workers/shared.js");
+      worker.port.dispatchEvent(new MessageEvent("messageerror"));
+      await beacon.flush();
+      const events = signalsSent(sent, "worker_failure");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        endpoint: "/workers/shared.js",
+        failureKind: "messageerror",
+        workerType: "shared",
+      });
+      await beacon.close();
+      expect(window.SharedWorker).toBe(fakeSharedWorkerConstructor);
+    } finally {
+      window.SharedWorker = original;
+    }
+  });
+
+  test("reports handled service-worker registration failures", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    const container = new EventTarget() as EventTarget & {
+      register: ServiceWorkerContainer["register"];
+    };
+    container.register = async () => {
+      throw new Error("registration rejected");
+    };
+    const originalRegister = container.register;
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: container,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      await beacon.flush();
+      const events = signalsSent(sent, "service_worker_failure");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        endpoint: "/sw.js",
+        failureKind: "registration",
+      });
+      await beacon.close();
+      expect(navigator.serviceWorker.register).toBe(originalRegister);
+    } finally {
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
+  });
+
+  test("reports a service worker that becomes redundant before activation", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    class FakeServiceWorker extends EventTarget {
+      readonly scriptURL = "https://app.test/sw.js";
+      state: ServiceWorkerState = "installing";
+    }
+    const installing = new FakeServiceWorker();
+    const registration = new EventTarget() as EventTarget & {
+      installing: ServiceWorker | null;
+    };
+    registration.installing = installing as unknown as ServiceWorker;
+    const container = new EventTarget() as EventTarget & {
+      register: ServiceWorkerContainer["register"];
+    };
+    container.register = async () =>
+      registration as unknown as ServiceWorkerRegistration;
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: container,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await navigator.serviceWorker.register("/sw.js");
+      installing.state = "redundant";
+      installing.dispatchEvent(new Event("statechange"));
+      await beacon.flush();
+      const events = signalsSent(sent, "service_worker_failure");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        endpoint: "/sw.js",
+        failureKind: "installation",
+      });
+      await beacon.close();
+    } finally {
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
   });
 
   test("reports one endpoint hammered inside the window as a storm", async () => {

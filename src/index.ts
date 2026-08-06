@@ -23,7 +23,10 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 
 /** Stable names for Beacon's built-in UX and health signals. */
 export const BEACON_SIGNAL = {
+  AUTH_FAILURE_STORM: "auth_failure_storm",
+  BROWSER_INTERVENTION: "browser_intervention",
   CONSOLE_ERROR: "console_error",
+  CSP_VIOLATION: "csp_violation",
   DEAD_CLICK: "dead_click",
   FETCH_FAILED: "fetch_failed",
   FOCUS_LOST: "focus_lost",
@@ -32,16 +35,23 @@ export const BEACON_SIGNAL = {
   HTTP_5XX: "http_5xx",
   INVISIBLE_TEXT: "invisible_text",
   LAYOUT_OVERFLOW: "layout_overflow",
+  MAIN_THREAD_STALL: "main_thread_stall",
+  MODAL_FOCUS_ESCAPE: "modal_focus_escape",
   OCCLUDED_CONTROL: "occluded_control",
   RAGE_CLICK: "rage_click",
+  RATE_LIMITED: "rate_limited",
   RELOAD_LOOP: "reload_loop",
   REQUEST_STORM: "request_storm",
   SCROLL_JAIL: "scroll_jail",
   SLOW_RESPONSE: "slow_response",
+  SOCKET_ABNORMAL_CLOSE: "socket_abnormal_close",
   SOCKET_FLAPPING: "socket_flapping",
+  SSE_FLAPPING: "sse_flapping",
   STALE_RELEASE: "stale_release",
   STALLED_STREAM: "stalled_stream",
   STUCK_LOADING: "stuck_loading",
+  SERVICE_WORKER_FAILURE: "service_worker_failure",
+  WORKER_FAILURE: "worker_failure",
 } as const;
 
 export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
@@ -157,10 +167,21 @@ export type BeaconResourceFailure = {
  * full session streaming. Each enabled signal becomes a warning-level issue
  * (via `captureException`, so it carries breadcrumbs + the replayId), surfacing
  * silent problems no thrown error or user report would: rage/dead clicks,
- * server 5xx, slow/failed requests, and `console.error`. Reuses the existing
- * click / fetch / console instrumentation — no extra global patching.
+ * server failures, policy violations, worker/realtime faults, and
+ * `console.error`. Each detector is feature-gated and independently tunable.
  */
 export type BeaconSignals = {
+  /** Repeated 401/403 responses from one endpoint inside a short window.
+   *  Default true. */
+  authFailureStorms?: boolean;
+  /** Authorization failures from one endpoint that trip a storm. Default 4. */
+  authFailureStormCount?: number;
+  /** Window for the authorization-failure storm counter. Default 30000ms. */
+  authFailureStormWindowMs?: number;
+  /** Browser intervention reports surfaced by ReportingObserver. Default true. */
+  browserInterventions?: boolean;
+  /** Enforced Content Security Policy violations. Default true. */
+  cspViolations?: boolean;
   /** N rapid clicks in roughly the same spot. Default true. */
   rageClicks?: boolean;
   /** An interactive control clicked with no DOM/nav/scroll/focus/request response. Default true. */
@@ -199,12 +220,25 @@ export type BeaconSignals = {
   /** Quiet period after load/resize/navigation before the settled visual
    *  scan runs, letting transitions and lazy content settle. Default 600ms. */
   layoutOverflowSettleMs?: number;
+  /** Repeated long animation frames/tasks on a visible page. Default true. */
+  mainThreadStalls?: boolean;
+  /** Long-frame duration that counts as a main-thread stall. Default 200ms. */
+  mainThreadStallMs?: number;
+  /** Stalls inside the window that trip a report. Default 3. */
+  mainThreadStallCount?: number;
+  /** Window for repeated main-thread stalls. Default 10000ms. */
+  mainThreadStallWindowMs?: number;
+  /** Focus outside an open modal, including a modal that never receives
+   *  initial focus. Default true. */
+  modalFocusEscape?: boolean;
   /** Sampled `elementFromPoint` check for interactive controls covered by an
    *  unrelated element (leaked scrims, z-index bugs). Skipped entirely while
    *  a dialog is open. Default true. */
   occludedControls?: boolean;
   /** Rapid-click count that trips a rage click. Default 3. */
   rageClickCount?: number;
+  /** HTTP 429 responses. Default true. */
+  rateLimits?: boolean;
   /** Several full page loads within a minute — a crash or reload loop.
    *  Default true. */
   reloadLoops?: boolean;
@@ -220,9 +254,20 @@ export type BeaconSignals = {
    *  scroll lock leaked by a closed modal. Boundary scrolling (already at the
    *  top/bottom) is exempt. Default true. */
   scrollJail?: boolean;
+  /** Service-worker registration and installation failures. Default true. */
+  serviceWorkerFailures?: boolean;
+  /** Abnormal WebSocket closes (`wasClean: false` or non-normal codes).
+   *  Default true. */
+  socketAbnormalCloses?: boolean;
   /** WebSocket connect/close cycles to one URL tripping a flap report.
    *  Default true. */
   socketFlapping?: boolean;
+  /** Repeated EventSource error/reconnect cycles. Default true. */
+  sseFlapping?: boolean;
+  /** EventSource failures that trip a flap report. Default 4. */
+  sseFlapCount?: number;
+  /** Window for EventSource flap detection. Default 60000ms. */
+  sseFlapWindowMs?: number;
   /** This page's `release` is older than one this browser has already run —
    *  a service worker or cache serving a stale build. Default true. */
   staleReleases?: boolean;
@@ -239,6 +284,9 @@ export type BeaconSignals = {
   /** Age at which a visible loading indicator counts as stuck.
    *  Default 20000ms. */
   stuckLoadingMs?: number;
+  /** Dedicated/shared worker construction, runtime, and message decoding
+   *  failures. Default true. */
+  workerFailures?: boolean;
   /**
    * Maximum wait for a same-origin link accepted by an SPA router to finish
    * navigating before it is considered dead. Default 8000ms; never shorter
@@ -603,9 +651,12 @@ const SENSITIVE_KEY_NAMES = new Set([
   "token",
 ]);
 const URL_KEY_NAMES = new Set([
+  "blockeduri",
   "endpoint",
   "errorfilename",
+  "reporturl",
   "resourceurl",
+  "sourcefile",
   "url",
 ]);
 const normalizeFieldName = (key: string): string =>
@@ -1131,11 +1182,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const SCROLL_JAIL_EVENT_COUNT = 8;
   const SCROLL_JAIL_WINDOW_MS = 2000;
   const SCROLL_JAIL_BOUNDARY_TOLERANCE_PX = 2;
+  const AUTH_FAILURE_STORM_DEFAULT_COUNT = 4;
+  const AUTH_FAILURE_STORM_DEFAULT_WINDOW_MS = 30000;
   const REQUEST_STORM_DEFAULT_COUNT = 15;
   const REQUEST_STORM_DEFAULT_WINDOW_MS = 10000;
   const SOCKET_FLAP_CYCLES = 4;
   const SOCKET_FLAP_WINDOW_MS = 60000;
+  const SSE_FLAP_DEFAULT_COUNT = 4;
+  const SSE_FLAP_DEFAULT_WINDOW_MS = 60000;
   const STALLED_STREAM_DEFAULT_MS = 60000;
+  const MODAL_FOCUS_SETTLE_MS = 100;
+  const MAIN_THREAD_STALL_DEFAULT_MS = 200;
+  const MAIN_THREAD_STALL_DEFAULT_COUNT = 3;
+  const MAIN_THREAD_STALL_DEFAULT_WINDOW_MS = 10000;
   const RELOAD_LOOP_COUNT = 4;
   const RELOAD_LOOP_WINDOW_MS = 60000;
   const RELOAD_LOOP_STORAGE_KEY = "beacon:reload-times";
@@ -1443,6 +1502,51 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       : undefined;
   };
 
+  const authFailureStormCount =
+    signals?.authFailureStormCount ?? AUTH_FAILURE_STORM_DEFAULT_COUNT;
+  const authFailureStormWindowMs =
+    signals?.authFailureStormWindowMs ?? AUTH_FAILURE_STORM_DEFAULT_WINDOW_MS;
+  const authFailuresByEndpoint = new Map<
+    string,
+    Array<{ at: number; status: number }>
+  >();
+  const reportedAuthFailureStorms = new Set<string>();
+  const recordAuthFailure = (
+    endpoint: string,
+    method: string,
+    status: number,
+  ): boolean => {
+    if (signals === null || signals.authFailureStorms === false) return false;
+    const label = `${method} ${endpoint}`;
+    const now = Date.now();
+    const failures = (authFailuresByEndpoint.get(label) ?? []).filter(
+      ({ at }) => now - at < authFailureStormWindowMs,
+    );
+    failures.push({ at: now, status });
+    authFailuresByEndpoint.set(label, failures);
+    if (
+      failures.length < authFailureStormCount ||
+      reportedAuthFailureStorms.has(label)
+    ) {
+      return false;
+    }
+    reportedAuthFailureStorms.add(label);
+    const statuses = [...new Set(failures.map((failure) => failure.status))];
+    emitSignal(
+      `Authorization failure storm — ${label} repeatedly rejected requests — ${shortUrl(location.href)}`,
+      {
+        endpoint,
+        failureCount: String(failures.length),
+        method,
+        signal: BEACON_SIGNAL.AUTH_FAILURE_STORM,
+        statuses: statuses.join(","),
+        windowMs: String(authFailureStormWindowMs),
+      },
+    );
+
+    return true;
+  };
+
   const reportResponseSignal = (
     url: string,
     method: string,
@@ -1464,6 +1568,25 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         },
         traceId,
       );
+      return;
+    }
+    if (signals.rateLimits !== false && status === 429) {
+      emitSignal(
+        `Rate limited — ${responseMethod} ${responseEndpoint} returned 429`,
+        {
+          endpoint: responseEndpoint,
+          method: responseMethod,
+          signal: BEACON_SIGNAL.RATE_LIMITED,
+          status: String(status),
+        },
+        traceId,
+      );
+      return;
+    }
+    if (
+      (status === 401 || status === 403) &&
+      recordAuthFailure(responseEndpoint, responseMethod, status)
+    ) {
       return;
     }
     if (signals.slowResponses !== false && durationMs > slowResponseMs) {
@@ -1717,6 +1840,170 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     `${message} — ${shortUrl(location.href)} — ${describeElement(control)}`;
 
   // --- auto-instrumentation -------------------------------------------------
+
+  if (
+    signals !== null &&
+    signals.cspViolations !== false &&
+    typeof document !== "undefined"
+  ) {
+    const reportedViolations = new Set<string>();
+    const onSecurityPolicyViolation = (event: Event): void => {
+      const violation = event as SecurityPolicyViolationEvent;
+      if (violation.disposition !== "enforce") return;
+      const directive =
+        violation.effectiveDirective ||
+        violation.violatedDirective ||
+        "unknown";
+      const blockedUri = violation.blockedURI || "unknown";
+      const key = `${directive}|${blockedUri}`;
+      if (reportedViolations.has(key)) return;
+      reportedViolations.add(key);
+      emitSignal(
+        `CSP violation — ${directive} blocked a resource — ${shortUrl(location.href)}`,
+        {
+          blockedUri,
+          directive,
+          disposition: violation.disposition,
+          signal: BEACON_SIGNAL.CSP_VIOLATION,
+          ...(violation.sourceFile === ""
+            ? {}
+            : { sourceFile: violation.sourceFile }),
+          ...(violation.lineNumber > 0
+            ? { sourceLine: String(violation.lineNumber) }
+            : {}),
+        },
+      );
+    };
+    document.addEventListener(
+      "securitypolicyviolation",
+      onSecurityPolicyViolation,
+    );
+    cleanups.push(() =>
+      document.removeEventListener(
+        "securitypolicyviolation",
+        onSecurityPolicyViolation,
+      ),
+    );
+  }
+
+  if (
+    signals !== null &&
+    signals.browserInterventions !== false &&
+    typeof ReportingObserver !== "undefined"
+  ) {
+    try {
+      const reportedInterventions = new Set<string>();
+      const observer = new ReportingObserver(
+        (reports) => {
+          for (const report of reports) {
+            if (report.type !== "intervention") continue;
+            const body = report.body as unknown as {
+              columnNumber?: unknown;
+              id?: unknown;
+              lineNumber?: unknown;
+              message?: unknown;
+              sourceFile?: unknown;
+            };
+            const interventionId =
+              typeof body.id === "string" && body.id !== ""
+                ? body.id.slice(0, SIGNAL_TEXT_MAX)
+                : "browser-intervention";
+            const reportUrl = report.url || location.href;
+            const key = `${interventionId}|${shortUrl(reportUrl)}`;
+            if (reportedInterventions.has(key)) continue;
+            reportedInterventions.add(key);
+            emitSignal(
+              `Browser intervention — ${interventionId} — ${shortUrl(location.href)}`,
+              {
+                interventionId,
+                reportUrl,
+                signal: BEACON_SIGNAL.BROWSER_INTERVENTION,
+                ...(typeof body.sourceFile === "string"
+                  ? { sourceFile: body.sourceFile }
+                  : {}),
+                ...(typeof body.lineNumber === "number"
+                  ? { sourceLine: String(body.lineNumber) }
+                  : {}),
+              },
+              undefined,
+              {
+                ...(typeof body.message === "string"
+                  ? {
+                      interventionMessage: body.message.slice(
+                        0,
+                        SIGNAL_TEXT_MAX,
+                      ),
+                    }
+                  : {}),
+              },
+            );
+          }
+        },
+        { buffered: true, types: ["intervention"] },
+      );
+      observer.observe();
+      cleanups.push(() => observer.disconnect());
+    } catch {
+      // ReportingObserver is optional and partially implemented by browsers.
+    }
+  }
+
+  if (
+    signals !== null &&
+    signals.mainThreadStalls !== false &&
+    typeof PerformanceObserver !== "undefined"
+  ) {
+    const stallMs = signals.mainThreadStallMs ?? MAIN_THREAD_STALL_DEFAULT_MS;
+    const stallCount =
+      signals.mainThreadStallCount ?? MAIN_THREAD_STALL_DEFAULT_COUNT;
+    const stallWindowMs =
+      signals.mainThreadStallWindowMs ?? MAIN_THREAD_STALL_DEFAULT_WINDOW_MS;
+    let stallTimes: number[] = [];
+    let reported = false;
+    try {
+      const observer = new PerformanceObserver((list) => {
+        if (reported || document.visibilityState === "hidden") return;
+        for (const entry of list.getEntries()) {
+          if (entry.duration < stallMs) continue;
+          const now = Date.now();
+          stallTimes = stallTimes.filter((at) => now - at < stallWindowMs);
+          stallTimes.push(now);
+          if (stallTimes.length < stallCount) continue;
+          reported = true;
+          emitSignal(
+            `Main-thread stall — repeated long frames blocked the page — ${shortUrl(location.href)}`,
+            {
+              durationMs: String(Math.round(entry.duration)),
+              entryType: entry.entryType,
+              signal: BEACON_SIGNAL.MAIN_THREAD_STALL,
+              stallCount: String(stallTimes.length),
+              windowMs: String(stallWindowMs),
+            },
+          );
+          break;
+        }
+      });
+      const supportedTypes = PerformanceObserver.supportedEntryTypes;
+      let observing = false;
+      if (supportedTypes?.includes("long-animation-frame")) {
+        observer.observe({ buffered: true, type: "long-animation-frame" });
+        observing = true;
+      } else if (supportedTypes?.includes("longtask")) {
+        observer.observe({ buffered: true, type: "longtask" });
+        observing = true;
+      } else if (supportedTypes === undefined || supportedTypes.length === 0) {
+        // Test doubles and older implementations may not expose the static
+        // support list; try the modern type and let the outer guard catch it.
+        observer.observe({ buffered: true, type: "long-animation-frame" });
+        observing = true;
+      } else {
+        observer.disconnect();
+      }
+      if (observing) cleanups.push(() => observer.disconnect());
+    } catch {
+      // Neither long-animation-frame nor longtask is supported.
+    }
+  }
 
   if (instrument.globalErrors !== false) {
     const onError = (event: Event): void => {
@@ -2559,14 +2846,65 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       cleanups.push(() => document.removeEventListener("wheel", onWheel));
     }
 
-    // Focus loss: a dialog unmounts while owning focus and keyboard users
-    // land on <body> with no way to know where they are.
-    if (signals.focusLoss !== false) {
+    // Dialog focus: report both focus dropped after unmount and focus escaping
+    // (or never entering) an explicitly modal surface.
+    if (signals.focusLoss !== false || signals.modalFocusEscape !== false) {
       const DIALOG_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog';
+      const MODAL_SELECTOR = '[aria-modal="true"], dialog[open]';
       let lastDialogFocus: Element | null = null;
       const reportedFocusLoss = new Set<string>();
+      const reportedModalEscapes = new WeakSet<Element>();
+      const modalTimers = new Set<ReturnType<typeof setTimeout>>();
+      const reportModalEscape = (
+        modal: Element,
+        active: Element | null,
+        reason: "escaped" | "initial-focus-missing",
+      ): void => {
+        if (
+          signals.modalFocusEscape === false ||
+          reportedModalEscapes.has(modal) ||
+          document.visibilityState === "hidden"
+        ) {
+          return;
+        }
+        reportedModalEscapes.add(modal);
+        const modalDescriptor = describeElement(modal);
+        emitSignal(
+          `Modal focus escape — ${modalDescriptor} did not contain keyboard focus — ${shortUrl(location.href)}`,
+          {
+            modal: modalDescriptor,
+            reason,
+            signal: BEACON_SIGNAL.MODAL_FOCUS_ESCAPE,
+            target: active === null ? "none" : describeElement(active),
+          },
+        );
+      };
+      const openModals = (): Element[] =>
+        Array.from(document.querySelectorAll(MODAL_SELECTOR));
+      const checkInitialModalFocus = (modal: Element): void => {
+        const timer = setTimeout(() => {
+          modalTimers.delete(timer);
+          if (!modal.isConnected || !modal.matches(MODAL_SELECTOR)) return;
+          const active =
+            document.activeElement instanceof Element
+              ? document.activeElement
+              : null;
+          if (active !== null && modal.contains(active)) return;
+          reportModalEscape(modal, active, "initial-focus-missing");
+        }, MODAL_FOCUS_SETTLE_MS);
+        modalTimers.add(timer);
+      };
       const onFocusIn = (event: FocusEvent): void => {
         const target = event.target;
+        if (signals.modalFocusEscape !== false && target instanceof Element) {
+          const modals = openModals();
+          if (
+            modals.length > 0 &&
+            !modals.some((modal) => modal.contains(target))
+          ) {
+            reportModalEscape(modals[modals.length - 1]!, target, "escaped");
+          }
+        }
         lastDialogFocus =
           target instanceof Element && target.closest(DIALOG_SELECTOR) !== null
             ? target
@@ -2590,9 +2928,45 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       };
       document.addEventListener("focusin", onFocusIn, true);
       document.addEventListener("focusout", onFocusOut, true);
+      let modalObserver: MutationObserver | undefined;
+      if (
+        signals.modalFocusEscape !== false &&
+        typeof MutationObserver !== "undefined"
+      ) {
+        for (const modal of openModals()) checkInitialModalFocus(modal);
+        modalObserver = new MutationObserver((records) => {
+          for (const record of records) {
+            if (
+              record.type === "attributes" &&
+              record.target instanceof Element &&
+              record.target.matches(MODAL_SELECTOR)
+            ) {
+              checkInitialModalFocus(record.target);
+            }
+            for (const added of Array.from(record.addedNodes)) {
+              if (!(added instanceof Element)) continue;
+              if (added.matches(MODAL_SELECTOR)) checkInitialModalFocus(added);
+              for (const modal of Array.from(
+                added.querySelectorAll(MODAL_SELECTOR),
+              )) {
+                checkInitialModalFocus(modal);
+              }
+            }
+          }
+        });
+        modalObserver.observe(document.documentElement, {
+          attributeFilter: ["aria-modal", "open"],
+          attributes: true,
+          childList: true,
+          subtree: true,
+        });
+      }
       cleanups.push(() => {
         document.removeEventListener("focusin", onFocusIn, true);
         document.removeEventListener("focusout", onFocusOut, true);
+        modalObserver?.disconnect();
+        for (const timer of modalTimers) clearTimeout(timer);
+        modalTimers.clear();
       });
     }
 
@@ -2710,13 +3084,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // API — pick a threshold above the real message cadence.
   if (
     signals !== null &&
-    signals.stalledStreams !== false &&
+    (signals.stalledStreams !== false || signals.sseFlapping !== false) &&
     typeof window.EventSource === "function"
   ) {
     const stalledStreamMs =
       signals.stalledStreamMs ?? STALLED_STREAM_DEFAULT_MS;
+    const sseFlapCount = signals.sseFlapCount ?? SSE_FLAP_DEFAULT_COUNT;
+    const sseFlapWindowMs =
+      signals.sseFlapWindowMs ?? SSE_FLAP_DEFAULT_WINDOW_MS;
     const OriginalEventSource = window.EventSource;
     const reportedStreams = new Set<string>();
+    const errorsByEndpoint = new Map<string, number[]>();
+    const reportedFlappingStreams = new Set<string>();
     const instrumentSource = (
       source: EventSource,
       endpointLabel: string,
@@ -2726,6 +3105,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         if (stallTimer !== undefined) clearTimeout(stallTimer);
       };
       const check = (): void => {
+        if (signals.stalledStreams === false) return;
         if (source.readyState !== OriginalEventSource.OPEN) return;
         if (document.visibilityState === "hidden") {
           arm();
@@ -2743,8 +3123,41 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           },
         );
       };
+      const recordError = (): void => {
+        disarm();
+        if (
+          signals.sseFlapping === false ||
+          pageLifecycleEnding ||
+          document.visibilityState === "hidden"
+        ) {
+          return;
+        }
+        const now = Date.now();
+        const errors = (errorsByEndpoint.get(endpointLabel) ?? []).filter(
+          (at) => now - at < sseFlapWindowMs,
+        );
+        errors.push(now);
+        errorsByEndpoint.set(endpointLabel, errors);
+        if (
+          errors.length < sseFlapCount ||
+          reportedFlappingStreams.has(endpointLabel)
+        ) {
+          return;
+        }
+        reportedFlappingStreams.add(endpointLabel);
+        emitSignal(
+          `SSE flapping — ${endpointLabel} keeps failing and reconnecting — ${shortUrl(location.href)}`,
+          {
+            endpoint: endpointLabel,
+            errorCount: String(errors.length),
+            signal: BEACON_SIGNAL.SSE_FLAPPING,
+            windowMs: String(sseFlapWindowMs),
+          },
+        );
+      };
       const arm = (): void => {
         disarm();
+        if (signals.stalledStreams === false) return;
         stallTimer = setTimeout(check, stalledStreamMs);
       };
       const originalAddEventListener = source.addEventListener.bind(source);
@@ -2764,7 +3177,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       }) as typeof source.addEventListener;
       originalAddEventListener("open", arm);
       originalAddEventListener("message", arm);
-      originalAddEventListener("error", disarm);
+      originalAddEventListener("error", recordError);
       const originalClose = source.close.bind(source);
       source.close = (): void => {
         disarm();
@@ -2797,18 +3210,41 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // heartbeat bug burning a reconnect loop. Page-teardown closes are exempt.
   if (
     signals !== null &&
-    signals.socketFlapping !== false &&
+    (signals.socketFlapping !== false ||
+      signals.socketAbnormalCloses !== false) &&
     typeof window.WebSocket === "function"
   ) {
     const OriginalWebSocket = window.WebSocket;
     const closesByUrl = new Map<string, number[]>();
     const reportedSockets = new Set<string>();
+    const reportedAbnormalCloses = new Set<string>();
     const wrappedWebSocket = new Proxy(OriginalWebSocket, {
       construct(target, args: unknown[]): object {
         const socket = Reflect.construct(target, args) as unknown as WebSocket;
         const label = shortUrl(String(args[0]));
-        socket.addEventListener("close", () => {
+        socket.addEventListener("close", (event) => {
           if (pageLifecycleEnding) return;
+          if (
+            signals.socketAbnormalCloses !== false &&
+            typeof CloseEvent !== "undefined" &&
+            event instanceof CloseEvent &&
+            (!event.wasClean || (event.code !== 1000 && event.code !== 1001))
+          ) {
+            const abnormalKey = `${label}|${event.code}`;
+            if (!reportedAbnormalCloses.has(abnormalKey)) {
+              reportedAbnormalCloses.add(abnormalKey);
+              emitSignal(
+                `Abnormal socket close — ${label} closed unexpectedly — ${shortUrl(location.href)}`,
+                {
+                  closeCode: String(event.code),
+                  endpoint: label,
+                  signal: BEACON_SIGNAL.SOCKET_ABNORMAL_CLOSE,
+                  wasClean: String(event.wasClean),
+                },
+              );
+            }
+          }
+          if (signals.socketFlapping === false) return;
           const now = Date.now();
           const closes = (closesByUrl.get(label) ?? []).filter(
             (at) => now - at < SOCKET_FLAP_WINDOW_MS,
@@ -2842,6 +3278,258 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         window.WebSocket = OriginalWebSocket;
       }
     });
+  }
+
+  // Worker failures do not reliably reach window.onerror. Instrument worker
+  // instances at construction so handled runtime/message failures still carry
+  // page, release, breadcrumb, and replay context.
+  if (signals !== null && signals.workerFailures !== false) {
+    const reportedWorkerFailures = new Set<string>();
+    const workerListenerCleanups: Array<() => void> = [];
+    cleanups.push(() => {
+      for (const cleanup of workerListenerCleanups.splice(
+        0,
+        workerListenerCleanups.length,
+      )) {
+        cleanup();
+      }
+    });
+    const reportWorkerFailure = (
+      workerType: "dedicated" | "shared",
+      endpointLabel: string,
+      failureKind: "construction" | "error" | "messageerror",
+      error?: Error,
+    ): void => {
+      const key = `${workerType}|${endpointLabel}|${failureKind}`;
+      if (reportedWorkerFailures.has(key)) return;
+      reportedWorkerFailures.add(key);
+      emitSignal(
+        `Worker failure — ${workerType} worker ${endpointLabel} failed — ${shortUrl(location.href)}`,
+        {
+          endpoint: endpointLabel,
+          failureKind,
+          signal: BEACON_SIGNAL.WORKER_FAILURE,
+          workerType,
+        },
+        undefined,
+        error === undefined
+          ? undefined
+          : {
+              workerError: {
+                message: error.message,
+                name: error.name,
+                ...(error.stack === undefined ? {} : { stack: error.stack }),
+              },
+            },
+      );
+    };
+    if (typeof window.Worker === "function") {
+      const OriginalWorker = window.Worker;
+      const wrappedWorker = new Proxy(OriginalWorker, {
+        construct(target, args: ConstructorParameters<typeof Worker>): object {
+          const endpointLabel = shortUrl(String(args[0]));
+          try {
+            const worker = Reflect.construct(target, args) as Worker;
+            const onError = (event: ErrorEvent): void => {
+              const error =
+                event instanceof ErrorEvent
+                  ? errorWithStack(
+                      "WorkerError",
+                      event.message || "Worker runtime error",
+                      errorEventLocation(event),
+                    )
+                  : undefined;
+              reportWorkerFailure("dedicated", endpointLabel, "error", error);
+            };
+            const onMessageError = (): void =>
+              reportWorkerFailure("dedicated", endpointLabel, "messageerror");
+            worker.addEventListener("error", onError);
+            worker.addEventListener("messageerror", onMessageError);
+            workerListenerCleanups.push(() => {
+              worker.removeEventListener("error", onError);
+              worker.removeEventListener("messageerror", onMessageError);
+            });
+
+            return worker;
+          } catch (error) {
+            reportWorkerFailure(
+              "dedicated",
+              endpointLabel,
+              "construction",
+              toError(error),
+            );
+            throw error;
+          }
+        },
+      });
+      window.Worker = wrappedWorker as typeof Worker;
+      cleanups.push(() => {
+        if (window.Worker === wrappedWorker) window.Worker = OriginalWorker;
+      });
+    }
+    if (typeof window.SharedWorker === "function") {
+      const OriginalSharedWorker = window.SharedWorker;
+      const wrappedSharedWorker = new Proxy(OriginalSharedWorker, {
+        construct(
+          target,
+          args: ConstructorParameters<typeof SharedWorker>,
+        ): object {
+          const endpointLabel = shortUrl(String(args[0]));
+          try {
+            const worker = Reflect.construct(target, args) as SharedWorker;
+            const onError = (event: ErrorEvent): void => {
+              const error =
+                event instanceof ErrorEvent
+                  ? errorWithStack(
+                      "WorkerError",
+                      event.message || "Shared worker runtime error",
+                      errorEventLocation(event),
+                    )
+                  : undefined;
+              reportWorkerFailure("shared", endpointLabel, "error", error);
+            };
+            const onMessageError = (): void =>
+              reportWorkerFailure("shared", endpointLabel, "messageerror");
+            worker.addEventListener("error", onError);
+            worker.port.addEventListener("messageerror", onMessageError);
+            workerListenerCleanups.push(() => {
+              worker.removeEventListener("error", onError);
+              worker.port.removeEventListener("messageerror", onMessageError);
+            });
+
+            return worker;
+          } catch (error) {
+            reportWorkerFailure(
+              "shared",
+              endpointLabel,
+              "construction",
+              toError(error),
+            );
+            throw error;
+          }
+        },
+      });
+      window.SharedWorker = wrappedSharedWorker as typeof SharedWorker;
+      cleanups.push(() => {
+        if (window.SharedWorker === wrappedSharedWorker) {
+          window.SharedWorker = OriginalSharedWorker;
+        }
+      });
+    }
+  }
+
+  if (
+    signals !== null &&
+    signals.serviceWorkerFailures !== false &&
+    typeof navigator !== "undefined" &&
+    "serviceWorker" in navigator
+  ) {
+    try {
+      const container = navigator.serviceWorker;
+      const reportedServiceWorkerFailures = new Set<string>();
+      const serviceWorkerListenerCleanups: Array<() => void> = [];
+      const reportServiceWorkerFailure = (
+        endpointLabel: string,
+        failureKind: "installation" | "messageerror" | "registration",
+        error?: Error,
+      ): void => {
+        const key = `${endpointLabel}|${failureKind}`;
+        if (reportedServiceWorkerFailures.has(key)) return;
+        reportedServiceWorkerFailures.add(key);
+        emitSignal(
+          `Service worker failure — ${endpointLabel} failed during ${failureKind} — ${shortUrl(location.href)}`,
+          {
+            endpoint: endpointLabel,
+            failureKind,
+            signal: BEACON_SIGNAL.SERVICE_WORKER_FAILURE,
+          },
+          undefined,
+          error === undefined
+            ? undefined
+            : {
+                serviceWorkerError: {
+                  message: error.message,
+                  name: error.name,
+                  ...(error.stack === undefined ? {} : { stack: error.stack }),
+                },
+              },
+        );
+      };
+      const watchInstallingWorker = (worker: ServiceWorker): void => {
+        let activated = worker.state === "activated";
+        const onStateChange = (): void => {
+          if (worker.state === "activated") activated = true;
+          if (worker.state !== "redundant" || activated) return;
+          reportServiceWorkerFailure(
+            shortUrl(worker.scriptURL),
+            "installation",
+          );
+        };
+        worker.addEventListener("statechange", onStateChange);
+        serviceWorkerListenerCleanups.push(() =>
+          worker.removeEventListener("statechange", onStateChange),
+        );
+      };
+      const watchRegistration = (
+        registration: ServiceWorkerRegistration,
+      ): void => {
+        if (registration.installing !== null) {
+          watchInstallingWorker(registration.installing);
+        }
+        const onUpdateFound = (): void => {
+          if (registration.installing !== null) {
+            watchInstallingWorker(registration.installing);
+          }
+        };
+        registration.addEventListener("updatefound", onUpdateFound);
+        serviceWorkerListenerCleanups.push(() =>
+          registration.removeEventListener("updatefound", onUpdateFound),
+        );
+      };
+      const originalRegister = container.register;
+      const wrappedRegister: typeof container.register = async function (
+        this: ServiceWorkerContainer,
+        scriptURL,
+        registrationOptions,
+      ) {
+        const endpointLabel = shortUrl(String(scriptURL));
+        try {
+          const registration = await originalRegister.call(
+            this,
+            scriptURL,
+            registrationOptions,
+          );
+          watchRegistration(registration);
+
+          return registration;
+        } catch (error) {
+          reportServiceWorkerFailure(
+            endpointLabel,
+            "registration",
+            toError(error),
+          );
+          throw error;
+        }
+      };
+      container.register = wrappedRegister;
+      const onMessageError = (): void =>
+        reportServiceWorkerFailure("service-worker", "messageerror");
+      container.addEventListener("messageerror", onMessageError);
+      cleanups.push(() => {
+        container.removeEventListener("messageerror", onMessageError);
+        for (const cleanup of serviceWorkerListenerCleanups.splice(
+          0,
+          serviceWorkerListenerCleanups.length,
+        )) {
+          cleanup();
+        }
+        if (container.register === wrappedRegister) {
+          container.register = originalRegister;
+        }
+      });
+    } catch {
+      // Service workers may be unavailable in insecure or restricted contexts.
+    }
   }
 
   // ——— Boot-time watchdogs ——————————————————————————————————————————————

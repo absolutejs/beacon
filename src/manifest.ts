@@ -99,7 +99,7 @@ export const manifest = defineManifest<BeaconOptions>()({
       Type.Boolean({
         default: true,
         description:
-          "Capture dead/rage clicks, failed or slow requests, 5xx responses, and console errors.",
+          "Capture actionable browser reliability, accessibility, network, policy, worker, and realtime-transport failures.",
         title: "Actionable browser signals",
       }),
     ),
