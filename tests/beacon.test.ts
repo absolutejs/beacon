@@ -1121,6 +1121,7 @@ describe("auto-instrumentation", () => {
     "Mozilla/5.0 (compatible; BitSightBot/1.0)",
     "Mozilla/5.0 Dataprovider.com",
     "Mozilla/5.0 Google-NotebookLM",
+    "Mozilla/5.0 (compatible; meta-externalagent/1.1; +https://developers.facebook.com/docs/sharing/webmasters/crawler)",
   ])("drops crawler and scanner traffic: %s", (userAgent) => {
     expect(
       isKnownBeaconNoise(
