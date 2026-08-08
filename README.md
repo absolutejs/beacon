@@ -70,7 +70,9 @@ beacon.captureMessage("checkout started", "info");
 - **Stable semantic grouping** — pass `groupingKey` for synthetic or provider
   failures whose stack or wording can move between releases. The matching
   `@absolutejs/errors` ingest service validates and hashes it server-side;
-  clients never choose raw fingerprints.
+  clients never choose raw fingerprints. Beacon's built-in signals always add
+  a stable grouping key derived from the normalized route and semantic target,
+  excluding durations, counts, release ids, entity UUIDs, and collector stacks.
 - **Cause chains** — preserves nested `Error.cause` stacks and diagnostic fields
   in `extra.errorCauses`, including database driver error codes and details.
 - **Sampling + redaction** — `sampleRate`, a `beforeSend(event)` hook
@@ -81,7 +83,9 @@ beacon.captureMessage("checkout started", "info");
   it.
 - **Noise filtering** — known browser-host/scanner failures such as CefSharp's
   `Object Not Found Matching Id` rejection and confirmed Meta in-app-browser
-  native-bridge injection failures are dropped by default
+  native-bridge injection failures are dropped by default. Known crawler and
+  security-scanner user agents are dropped before they can create synthetic UI,
+  service-worker, or transport issues
   (`filterKnownNoise: false` opts out).
 - **Resource policy** — `instrument.resourceErrors` accepts a predicate so
   expected failures such as optional cross-origin images can become grouped
@@ -111,8 +115,9 @@ beacon.captureMessage("checkout started", "info");
   child painting past a non-scrolling parent (the flex-squeeze cutoff), and
   content cut by `overflow: hidden` without an ellipsis treatment. Issues
   group per element, kind, and viewport bucket (`xs/sm/md/lg/xl`), with the
-  spill size in tags. Subtrees of scroll containers and absolutely positioned
-  escapees (badges, popovers, drawers) are skipped by design; mark deliberate
+  spill size in tags. Hidden/off-canvas subtrees, icon-font glyph paint bounds,
+  scroll containers, and absolutely positioned escapees (badges, popovers,
+  drawers) are skipped by design; mark deliberate
   bleeds with `data-beacon-overflow="allow"`.
 - **Ambient watchdogs** — silent failures users abandon instead of reporting
   become warning issues: scroll jail (a leaked modal scroll lock), stuck
@@ -128,6 +133,9 @@ beacon.captureMessage("checkout started", "info");
   frustration (identical resubmits / repeated native-validation failures).
   Each is individually toggleable on `signals`, deduped, capped, and exempts
   `data-beacon-scan="allow"` subtrees where a DOM scan is involved.
+  Reload loops require repeated loads of the same normalized route; ordinary
+  navigation across several pages does not qualify. Occlusion scans exclude
+  hidden, inert, transparent, and pointer-disabled control subtrees.
 - **Theme and loading contracts** — mark an application boundary with
   `data-beacon-theme="adaptive"` to report large opaque surfaces whose
   luminance polarity contradicts the active light/dark mode. Intentional

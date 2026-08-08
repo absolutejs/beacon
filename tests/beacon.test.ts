@@ -56,7 +56,7 @@ afterEach(async () => {
   for (const beacon of open.splice(0, open.length)) await beacon.close();
   // Every createBeacon in this file is one "page load" to the boot-time
   // watchdogs — clear their storage so tests don't read as a reload loop.
-  sessionStorage.removeItem("beacon:reload-times");
+  sessionStorage.removeItem("beacon:reload-history-v2");
   localStorage.removeItem("beacon:release-first-seen");
 });
 
@@ -1115,6 +1115,21 @@ describe("auto-instrumentation", () => {
     ).toBe(false);
   });
 
+  test.each([
+    "Mozilla/5.0 (compatible; AdsBot-Google/2.1; +http://www.google.com/adsbot.html)",
+    "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+    "Mozilla/5.0 (compatible; BitSightBot/1.0)",
+    "Mozilla/5.0 Dataprovider.com",
+    "Mozilla/5.0 Google-NotebookLM",
+  ])("drops crawler and scanner traffic: %s", (userAgent) => {
+    expect(
+      isKnownBeaconNoise(
+        { message: "Application failed", name: "Error" },
+        userAgent,
+      ),
+    ).toBe(true);
+  });
+
   test("preserves browser location when an uncaught error has no Error object", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(
@@ -1910,6 +1925,9 @@ describe("layout-overflow signals", () => {
     expect(event?.tags?.spillPx).toBe("276");
     expect(event?.message).toContain("div.runaway-toolbar");
     expect(event?.message).not.toContain("276");
+    expect(event?.groupingKey).toMatch(
+      /^beacon-signal:layout_overflow:[0-9a-f]{16}$/,
+    );
 
     // The same offender at the same breakpoint stays one issue.
     await scan(beacon);
@@ -1961,6 +1979,36 @@ describe("layout-overflow signals", () => {
     await scan(beacon);
     expect(sent).toHaveLength(0);
     scroller.remove();
+  });
+
+  test("skips positioned subtrees fully outside the viewport", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const drawer = document.createElement("aside");
+    drawer.style.position = "fixed";
+    mockRect(drawer, domRect(-400, -100));
+    const child = document.createElement("nav");
+    mockRect(child, domRect(-400, -100));
+    drawer.append(child);
+    document.body.append(drawer);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    drawer.remove();
+  });
+
+  test("does not report material icon glyph paint bounds", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const parent = document.createElement("button");
+    mockRect(parent, domRect(0, 40));
+    const icon = document.createElement("span");
+    icon.className = "material-icons";
+    mockRect(icon, domRect(0, 48));
+    parent.append(icon);
+    document.body.append(parent);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    parent.remove();
   });
 
   test("reports clipped content unless an ellipsis treatment owns it", async () => {
@@ -2278,6 +2326,48 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("ignores Event Timing entries without a real interaction id", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "event") return;
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 120_904,
+                entryType: "event",
+                interactionId: 0,
+                name: "pointerout",
+                target: document.body,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { slowInteractionMs: 1000 },
+      });
+      await beacon.flush();
+      expect(signalsSent(sent, "slow_interaction")).toHaveLength(0);
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
   test("attributes disruptive layout shifts to their source elements", async () => {
     const original = globalThis.PerformanceObserver;
     class FakePerformanceObserver {
@@ -2478,7 +2568,8 @@ describe("ambient watchdog signals", () => {
         super();
         this.url = String(url);
       }
-      close(): void {
+      close(): void {}
+      serverClose(): void {
         this.dispatchEvent(new Event("close"));
       }
     }
@@ -2487,12 +2578,38 @@ describe("ambient watchdog signals", () => {
     const { beacon, sent } = makeWatchdogBeacon();
     for (let index = 0; index < 4; index += 1) {
       const socket = new window.WebSocket("wss://app.test/sync/ws");
-      (socket as unknown as FakeWebSocket).close();
+      (socket as unknown as FakeWebSocket).serverClose();
     }
     await beacon.flush();
     const events = signalsSent(sent, "socket_flapping");
     expect(events).toHaveLength(1);
     expect(events[0]?.tags?.endpoint).toBe("/sync/ws");
+    await beacon.close();
+    window.WebSocket = original;
+  });
+
+  test("does not count application-initiated WebSocket closes", async () => {
+    class FakeWebSocket extends EventTarget {
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {
+        this.dispatchEvent(
+          new CloseEvent("close", { code: 1005, wasClean: true }),
+        );
+      }
+    }
+    const original = window.WebSocket;
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const { beacon, sent } = makeWatchdogBeacon();
+    for (let index = 0; index < 4; index += 1) {
+      new window.WebSocket("wss://app.test/sync/ws").close();
+    }
+    await beacon.flush();
+    expect(signalsSent(sent, "socket_flapping")).toHaveLength(0);
+    expect(signalsSent(sent, "socket_abnormal_close")).toHaveLength(0);
     await beacon.close();
     window.WebSocket = original;
   });
@@ -2504,6 +2621,7 @@ describe("ambient watchdog signals", () => {
         super();
         this.url = String(url);
       }
+      close(): void {}
     }
     const original = window.WebSocket;
     window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
@@ -2513,6 +2631,10 @@ describe("ambient watchdog signals", () => {
     const normalSocket = new window.WebSocket("wss://app.test/sync/ws");
     normalSocket.dispatchEvent(
       new CloseEvent("close", { code: 1000, wasClean: true }),
+    );
+    const cleanNoStatusSocket = new window.WebSocket("wss://app.test/sync/ws");
+    cleanNoStatusSocket.dispatchEvent(
+      new CloseEvent("close", { code: 1005, wasClean: true }),
     );
     await beacon.flush();
     expect(sent).toHaveLength(0);
@@ -2715,15 +2837,35 @@ describe("ambient watchdog signals", () => {
   test("reports rapid repeated page loads as a reload loop", async () => {
     const now = Date.now();
     sessionStorage.setItem(
-      "beacon:reload-times",
-      JSON.stringify([now - 3000, now - 2000, now - 1000]),
+      "beacon:reload-history-v2",
+      JSON.stringify([
+        { at: now - 3000, route: location.pathname },
+        { at: now - 2000, route: location.pathname },
+        { at: now - 1000, route: location.pathname },
+      ]),
     );
     const { beacon, sent } = makeWatchdogBeacon();
     await beacon.flush();
     const events = signalsSent(sent, "reload_loop");
     expect(events).toHaveLength(1);
     expect(events[0]?.tags?.loadCount).toBe("4");
-    sessionStorage.removeItem("beacon:reload-times");
+    sessionStorage.removeItem("beacon:reload-history-v2");
+  });
+
+  test("does not call navigation across different routes a reload loop", async () => {
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-history-v2",
+      JSON.stringify([
+        { at: now - 3000, route: "/one" },
+        { at: now - 2000, route: "/two" },
+        { at: now - 1000, route: "/three" },
+      ]),
+    );
+    const { beacon, sent } = makeWatchdogBeacon();
+    await beacon.flush();
+    expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
+    sessionStorage.removeItem("beacon:reload-history-v2");
   });
 
   test("reports running a build older than one already seen", async () => {
@@ -2798,6 +2940,31 @@ describe("ambient watchdog signals", () => {
     expect(events[0]?.tags?.coveredBy).toBe("div.leaked-scrim");
     button.remove();
     scrim.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
+  test.each([
+    ["aria-hidden", "true"],
+    ["inert", ""],
+  ])("does not scan controls under a %s ancestor", async (attribute, value) => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const hiddenDialog = document.createElement("div");
+    hiddenDialog.setAttribute(attribute, value);
+    hiddenDialog.style.opacity = "0";
+    hiddenDialog.style.pointerEvents = "none";
+    const button = document.createElement("button");
+    setRect(button, rectOf(100, 200, 100, 140));
+    hiddenDialog.append(button);
+    const cover = document.createElement("div");
+    setRect(cover, rectOf(0, VIEWPORT_W, 0, VIEWPORT_H));
+    document.body.append(hiddenDialog, cover);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => cover;
+    await settle(beacon);
+    expect(signalsSent(sent, "occluded_control")).toHaveLength(0);
+    hiddenDialog.remove();
+    cover.remove();
     await beacon.close();
     document.elementFromPoint = originalFromPoint;
   });

@@ -924,6 +924,8 @@ const FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE =
   "Error invoking postMessage: Java object is gone";
 const FACEBOOK_ANDROID_PERFORMANCE_LOGGER =
   "iabjs://navigation_performance_logger_android";
+const KNOWN_CRAWLER_USER_AGENT =
+  /(?:AdsBot-Google|Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|Applebot|Bytespider|PetalBot|SemrushBot|AhrefsBot|DotBot|MJ12bot|GPTBot|ClaudeBot|PerplexityBot|Google-NotebookLM|BitSightBot|Dataprovider\.com)/i;
 
 const browserUserAgent = (): string =>
   typeof navigator === "undefined" ? "" : navigator.userAgent;
@@ -933,6 +935,7 @@ export const isKnownBeaconNoise = (
   event: Pick<BeaconEvent, "message" | "name" | "stack" | "tags">,
   userAgent = browserUserAgent(),
 ): boolean =>
+  KNOWN_CRAWLER_USER_AGENT.test(userAgent) ||
   (event.name === "UnhandledRejection" &&
     CEF_SHARP_REJECTION.test(event.message)) ||
   (FACEBOOK_IOS_IN_APP_BROWSER.test(userAgent) &&
@@ -1060,6 +1063,67 @@ const shortUrl = (url: string): string => {
   } catch {
     return url.slice(0, SHORT_URL_MAX);
   }
+};
+
+const UUID_PATH_SEGMENT =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
+const LONG_IDENTIFIER_SEGMENT = /\b(?:[0-9a-f]{16,}|\d{8,})\b/giu;
+const VOLATILE_SIGNAL_TAGS = new Set([
+  "actionId",
+  "closeCount",
+  "currentRelease",
+  "durationMs",
+  "elapsedMs",
+  "errorCount",
+  "interactionId",
+  "loadCount",
+  "newestRelease",
+  "obscuredPx",
+  "responseMs",
+  "shiftValue",
+  "signal",
+  "spillPx",
+  "stallCount",
+  "thresholdMs",
+  "userAgent",
+  "viewportHeight",
+  "viewportWidth",
+  "windowMs",
+]);
+
+const normalizeSignalIdentityPart = (value: string): string =>
+  value
+    .replace(UUID_PATH_SEGMENT, ":id")
+    .replace(LONG_IDENTIFIER_SEGMENT, ":id")
+    .slice(0, SIGNAL_IDENTITY_PART_MAX);
+
+const SIGNAL_IDENTITY_PART_MAX = 160;
+const stableIdentityHash = (value: string, seed: number): string => {
+  let hash = seed;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
+const signalGroupingKey = (
+  signalTags: BeaconTags & { signal: BeaconSignal },
+): string => {
+  const identity = [
+    `route=${normalizeSignalIdentityPart(shortUrl(location.href))}`,
+    ...Object.entries(signalTags)
+      .filter(([key]) => !VOLATILE_SIGNAL_TAGS.has(key))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(
+        ([key, value]) =>
+          `${key}=${normalizeSignalIdentityPart(String(value))}`,
+      ),
+  ].join("|");
+  const hash =
+    stableIdentityHash(identity, 0x811c9dc5) +
+    stableIdentityHash(identity, 0x9e3779b9);
+  return `beacon-signal:${signalTags.signal}:${hash}`;
 };
 
 // An anchor whose click does something invisible to us (new tab / download /
@@ -1382,7 +1446,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const MAIN_THREAD_STALL_DEFAULT_WINDOW_MS = 10000;
   const RELOAD_LOOP_COUNT = 4;
   const RELOAD_LOOP_WINDOW_MS = 60000;
-  const RELOAD_LOOP_STORAGE_KEY = "beacon:reload-times";
+  const RELOAD_LOOP_STORAGE_KEY = "beacon:reload-history-v2";
   const STALE_RELEASE_STORAGE_KEY = "beacon:release-first-seen";
   const STALE_RELEASE_GRACE_MS = 600000;
   const STALE_RELEASE_HISTORY_LIMIT = 5;
@@ -1706,6 +1770,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         .join("\n");
     }
     captureException(error, {
+      groupingKey: signalGroupingKey(signalTags),
       level: "warning",
       tags: signalTags,
       ...(traceId !== undefined ? { traceId } : {}),
@@ -2425,14 +2490,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           for (const child of detail.children ?? []) visit(child);
         };
         visit(navigation.notRestoredReasons);
-        const reasonList = [...reasons].slice(0, 10);
-        emitSignal(
-          `Back-forward cache blocked — ${reasonList.join(", ") || "unknown reason"} — ${shortUrl(location.href)}`,
-          {
-            reasons: reasonList.join(",") || "unknown",
-            signal: BEACON_SIGNAL.BFCACHE_BLOCKED,
-          },
-        );
+        const reasonList = [...reasons]
+          .filter((reason) => reason !== "masked")
+          .slice(0, 10);
+        if (reasonList.length > 0) {
+          emitSignal(
+            `Back-forward cache blocked — ${reasonList.join(", ")} — ${shortUrl(location.href)}`,
+            {
+              reasons: reasonList.join(","),
+              signal: BEACON_SIGNAL.BFCACHE_BLOCKED,
+            },
+          );
+        }
       }
     }
   }
@@ -2882,6 +2951,40 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const isScanExempt = (element: Element): boolean =>
       element.closest(`[${BEACON_ATTRIBUTE.SCAN}="allow"]`) !== null;
 
+    const hasHiddenAncestor = (
+      element: Element,
+      requirePointerEvents = false,
+    ): boolean => {
+      let current: Element | null = element;
+      while (current !== null) {
+        if (
+          current.hasAttribute("hidden") ||
+          current.hasAttribute("inert") ||
+          current.getAttribute("aria-hidden") === "true"
+        ) {
+          return true;
+        }
+        const style = window.getComputedStyle(current);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          style.visibility === "collapse" ||
+          Number.parseFloat(style.opacity || "1") <= 0.01 ||
+          (requirePointerEvents && style.pointerEvents === "none")
+        ) {
+          return true;
+        }
+        current = current.parentElement;
+      }
+      return false;
+    };
+
+    const isMaterialIconGlyph = (element: Element): boolean =>
+      [...element.classList].some(
+        (name) =>
+          name === "material-icons" || name.startsWith("material-symbols"),
+      );
+
     // Shared reporter for the non-overflow scan detectors: same dedupe key
     // shape and per-load cap discipline as layout overflow.
     const seenScanIssues = new Set<string>();
@@ -2941,13 +3044,22 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         if (overflowReports >= overflowMaxReports) return;
         if (element.getAttribute(BEACON_ATTRIBUTE.OVERFLOW) === "allow") return;
         const style = window.getComputedStyle(element);
-        if (style.display === "none" || style.visibility === "hidden") return;
+        if (hasHiddenAncestor(element)) return;
         const rect = element.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) return;
+        if (
+          (style.position === "absolute" || style.position === "fixed") &&
+          (rect.right <= 0 ||
+            rect.left >= viewportRight ||
+            rect.bottom <= 0 ||
+            rect.top >= document.documentElement.clientHeight)
+        ) {
+          return;
+        }
         const inFlow =
           style.position !== "absolute" && style.position !== "fixed";
 
-        if (inFlow) {
+        if (inFlow && !isMaterialIconGlyph(element)) {
           // Every visited element has only visible-overflow ancestors (the
           // walk stops at scrollers and clippers), so a rect crossing the
           // viewport's horizontal edge is genuinely painted offscreen.
@@ -3023,7 +3135,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       let sampled = 0;
       for (const control of Array.from(controls)) {
         if (sampled >= OCCLUSION_SAMPLE_LIMIT) return;
-        if (isScanExempt(control)) continue;
+        if (isScanExempt(control) || hasHiddenAncestor(control, true)) continue;
         const rect = control.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
         // Partially offscreen controls are the layout-overflow detector's job.
@@ -3542,7 +3654,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     typeof PerformanceObserver !== "undefined"
   ) {
     const minimum = signals.slowInteractionMs ?? SLOW_INTERACTION_DEFAULT_MS;
-    const reported = new Set<number | string>();
+    const reported = new Set<number>();
     try {
       const observer = new PerformanceObserver((list) => {
         for (const raw of list.getEntries()) {
@@ -3550,12 +3662,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             interactionId?: number;
             target?: Node | null;
           };
-          if (entry.duration < minimum) continue;
+          if (
+            entry.duration < minimum ||
+            entry.interactionId === undefined ||
+            entry.interactionId <= 0
+          )
+            continue;
           const target =
             entry.target instanceof Element
               ? describeElement(entry.target)
               : "unknown";
-          const key = entry.interactionId ?? `${entry.name}|${target}`;
+          const key = entry.interactionId;
           if (reported.has(key)) continue;
           reported.add(key);
           emitSignal(
@@ -3563,9 +3680,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             {
               durationMs: String(Math.round(entry.duration)),
               eventType: entry.name,
-              ...(entry.interactionId === undefined
-                ? {}
-                : { interactionId: String(entry.interactionId) }),
+              interactionId: String(entry.interactionId),
               signal: BEACON_SIGNAL.SLOW_INTERACTION,
               target,
             },
@@ -4606,13 +4721,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       construct(target, args: unknown[]): object {
         const socket = Reflect.construct(target, args) as unknown as WebSocket;
         const label = shortUrl(String(args[0]));
+        let applicationClose = false;
+        const originalClose = socket.close.bind(socket);
+        socket.close = (code?: number, reason?: string): void => {
+          applicationClose = true;
+          originalClose(code, reason);
+        };
         socket.addEventListener("close", (event) => {
-          if (pageLifecycleEnding) return;
+          if (pageLifecycleEnding || applicationClose) return;
           if (
             signals.socketAbnormalCloses !== false &&
             typeof CloseEvent !== "undefined" &&
             event instanceof CloseEvent &&
-            (!event.wasClean || (event.code !== 1000 && event.code !== 1001))
+            !event.wasClean
           ) {
             const abnormalKey = `${label}|${event.code}`;
             if (!reportedAbnormalCloses.has(abnormalKey)) {
@@ -4925,23 +5046,36 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     typeof sessionStorage !== "undefined"
   ) {
     try {
-      const now = Date.now();
-      const raw = sessionStorage.getItem(RELOAD_LOOP_STORAGE_KEY);
-      const parsed: unknown = raw === null ? [] : JSON.parse(raw);
-      const times = (Array.isArray(parsed) ? parsed : []).filter(
-        (at): at is number =>
-          typeof at === "number" && now - at < RELOAD_LOOP_WINDOW_MS,
-      );
-      times.push(now);
-      sessionStorage.setItem(RELOAD_LOOP_STORAGE_KEY, JSON.stringify(times));
-      if (times.length >= RELOAD_LOOP_COUNT) {
-        emitSignal(
-          `Reload loop — repeated page loads within a minute — ${shortUrl(location.href)}`,
-          {
-            loadCount: String(times.length),
-            signal: BEACON_SIGNAL.RELOAD_LOOP,
-          },
+      const navigation = performance.getEntriesByType("navigation")[0] as
+        PerformanceNavigationTiming | undefined;
+      if (navigation?.type !== "back_forward") {
+        const now = Date.now();
+        const route = normalizeSignalIdentityPart(shortUrl(location.href));
+        const raw = sessionStorage.getItem(RELOAD_LOOP_STORAGE_KEY);
+        const parsed: unknown = raw === null ? [] : JSON.parse(raw);
+        const history = (Array.isArray(parsed) ? parsed : []).filter(
+          (entry): entry is { at: number; route: string } =>
+            entry !== null &&
+            typeof entry === "object" &&
+            typeof (entry as { at?: unknown }).at === "number" &&
+            typeof (entry as { route?: unknown }).route === "string" &&
+            now - (entry as { at: number }).at < RELOAD_LOOP_WINDOW_MS,
         );
+        history.push({ at: now, route });
+        sessionStorage.setItem(
+          RELOAD_LOOP_STORAGE_KEY,
+          JSON.stringify(history),
+        );
+        const routeLoads = history.filter((entry) => entry.route === route);
+        if (routeLoads.length >= RELOAD_LOOP_COUNT) {
+          emitSignal(
+            `Reload loop — repeated page loads within a minute — ${shortUrl(location.href)}`,
+            {
+              loadCount: String(routeLoads.length),
+              signal: BEACON_SIGNAL.RELOAD_LOOP,
+            },
+          );
+        }
       }
     } catch {
       // Storage unavailable (private mode) — the detector stays off.
