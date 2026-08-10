@@ -1430,6 +1430,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX = 0.8;
   const SCROLL_JAIL_EVENT_COUNT = 8;
   const SCROLL_JAIL_WINDOW_MS = 2000;
+  // Passive wheel listeners can run before Chromium's compositor scroll is
+  // reflected in main-thread scrollTop. Give the default action time to
+  // settle before deciding that a scrollable element is actually immobile.
+  const SCROLL_JAIL_SETTLE_MS = 50;
   const SCROLL_JAIL_BOUNDARY_TOLERANCE_PX = 2;
   const AUTH_FAILURE_STORM_DEFAULT_COUNT = 4;
   const AUTH_FAILURE_STORM_DEFAULT_WINDOW_MS = 30000;
@@ -4189,6 +4193,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       };
       let jailBurst: Array<{ at: number; position: number }> = [];
       let jailScroller: Element | null = null;
+      let jailSettleTimer: ReturnType<typeof setTimeout> | undefined;
       const reportedScrollers = new Set<string>();
       const onWheel = (event: WheelEvent): void => {
         if (event.ctrlKey || event.defaultPrevented || event.deltaY === 0) {
@@ -4230,18 +4235,33 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           scroller.scrollTop !== first.position;
         jailBurst = [];
         if (moved) return;
-        // An open overlay may lock page scroll on purpose.
-        if (viewportCoveredByOverlay()) return;
-        const descriptor = describeElement(scroller);
-        if (reportedScrollers.has(descriptor)) return;
-        reportedScrollers.add(descriptor);
-        emitSignal(
-          `Scroll jail — ${descriptor} has scrollable content but never moves — ${shortUrl(location.href)}`,
-          { signal: BEACON_SIGNAL.SCROLL_JAIL, target: descriptor },
-        );
+        const startingPosition = first.position;
+        if (jailSettleTimer !== undefined) clearTimeout(jailSettleTimer);
+        jailSettleTimer = setTimeout(() => {
+          jailSettleTimer = undefined;
+          if (!scroller.isConnected || scroller.scrollTop !== startingPosition)
+            return;
+          const canStillMove = scrollingDown
+            ? scroller.scrollTop + scroller.clientHeight <
+              scroller.scrollHeight - SCROLL_JAIL_BOUNDARY_TOLERANCE_PX
+            : scroller.scrollTop > SCROLL_JAIL_BOUNDARY_TOLERANCE_PX;
+          if (!canStillMove) return;
+          // An open overlay may lock page scroll on purpose.
+          if (viewportCoveredByOverlay()) return;
+          const descriptor = describeElement(scroller);
+          if (reportedScrollers.has(descriptor)) return;
+          reportedScrollers.add(descriptor);
+          emitSignal(
+            `Scroll jail — ${descriptor} has scrollable content but never moves — ${shortUrl(location.href)}`,
+            { signal: BEACON_SIGNAL.SCROLL_JAIL, target: descriptor },
+          );
+        }, SCROLL_JAIL_SETTLE_MS);
       };
       document.addEventListener("wheel", onWheel, { passive: true });
-      cleanups.push(() => document.removeEventListener("wheel", onWheel));
+      cleanups.push(() => {
+        document.removeEventListener("wheel", onWheel);
+        if (jailSettleTimer !== undefined) clearTimeout(jailSettleTimer);
+      });
     }
 
     if (signals.thrashedCursors !== false) {
