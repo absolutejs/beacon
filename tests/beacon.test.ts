@@ -533,6 +533,79 @@ describe("auto-instrumentation", () => {
     form.remove();
   });
 
+  test("recognizes property-only updates outside a form as a click response", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const modal = document.createElement("div");
+    const input = document.createElement("input");
+    const button = document.createElement("button");
+    button.addEventListener("click", () => {
+      input.value = "generated password";
+    });
+    modal.append(input, button);
+    document.body.append(modal);
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(input.getAttribute("value")).toBeNull();
+    expect(input.value).toBe("generated password");
+    expect(sent).toHaveLength(0);
+    modal.remove();
+  });
+
+  test("recognizes a successful clipboard write as a click response", async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(
+      navigator,
+      "clipboard",
+    );
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async () => undefined },
+    });
+    const sent: BeaconEnvelope[] = [];
+    const button = document.createElement("button");
+    document.body.append(button);
+    try {
+      const beacon = track(
+        createBeacon({
+          instrument: { ...ALL_OFF, clicks: true },
+          project: "web",
+          signals: {
+            clipboardFailures: true,
+            deadClicks: true,
+            rageClicks: false,
+          },
+          transport: ({ body }) => {
+            sent.push(JSON.parse(body) as BeaconEnvelope);
+          },
+        }),
+      );
+      button.addEventListener("click", () => {
+        void navigator.clipboard.writeText("secret clipboard value");
+      });
+      button.click();
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      await beacon.flush();
+      expect(sent).toHaveLength(0);
+    } finally {
+      button.remove();
+      if (originalClipboard === undefined) {
+        Reflect.deleteProperty(navigator, "clipboard");
+      } else {
+        Object.defineProperty(navigator, "clipboard", originalClipboard);
+      }
+    }
+  });
+
   test("recognizes window.open as an external click response", async () => {
     const sent: BeaconEnvelope[] = [];
     const originalOpen = window.open;

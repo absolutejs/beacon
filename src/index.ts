@@ -1189,8 +1189,10 @@ const formControlState = (control: FormControl): string => {
 };
 
 // This snapshot exists only in memory during the click-response window. Form
-// values are compared locally and are never included in Beacon telemetry.
-const snapshotOwningForm = (
+// values are compared locally and are never included in Beacon telemetry. A
+// control can update an input outside a <form> (for example a modal password
+// generator), so fall back to the dialog or document instead of ignoring it.
+const snapshotRelevantFormControls = (
   control: Element,
 ): Map<FormControl, string> | null => {
   const nearest = control.closest("form");
@@ -1198,10 +1200,14 @@ const snapshotOwningForm = (
     control instanceof HTMLButtonElement || control instanceof HTMLInputElement
       ? control.form
       : null;
-  const form = nearest ?? associated;
-  if (form === null) return null;
+  const root =
+    nearest ?? associated ?? control.closest('[role="dialog"]') ?? document;
   const snapshot = new Map<FormControl, string>();
-  for (const element of Array.from(form.elements)) {
+  const elements =
+    root instanceof HTMLFormElement
+      ? Array.from(root.elements)
+      : Array.from(root.querySelectorAll("input, select, textarea"));
+  for (const element of elements) {
     if (isFormControl(element)) {
       snapshot.set(element, formControlState(element));
     }
@@ -1468,6 +1474,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // starts a request or opens another browsing context.
   let networkRequestCount = 0;
   let externalNavigationCount = 0;
+  let clipboardWriteCount = 0;
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
   let recentInteraction:
@@ -2128,9 +2135,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const urlBefore = location.href;
     const scrollBefore = window.scrollY;
     const activeBefore = document.activeElement;
-    const formBefore = snapshotOwningForm(control);
+    const formBefore = snapshotRelevantFormControls(control);
     const networkRequestsBefore = networkRequestCount;
     const externalNavigationsBefore = externalNavigationCount;
+    const clipboardWritesBefore = clipboardWriteCount;
     let routerAcceptedNavigation = false;
     let mutated = false;
     let extended = false;
@@ -2148,7 +2156,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       window.scrollY !== scrollBefore ||
       document.activeElement !== activeBefore ||
       networkRequestCount !== networkRequestsBefore ||
-      externalNavigationCount !== externalNavigationsBefore;
+      externalNavigationCount !== externalNavigationsBefore ||
+      clipboardWriteCount !== clipboardWritesBefore;
     const finish = (didRespond: boolean, navigationStalled = false): void => {
       if (finished) return;
       finished = true;
@@ -2735,7 +2744,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           : "unknown";
       const activation = navigator.userActivation?.isActive ?? false;
       try {
-        return await originalWriteText.call(clipboard, value);
+        const result = await originalWriteText.call(clipboard, value);
+        clipboardWriteCount += 1;
+
+        return result;
       } catch (error) {
         if (
           !pageLifecycleEnding &&
