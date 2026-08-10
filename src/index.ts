@@ -322,7 +322,7 @@ export type BeaconSignals = {
   mediaFailures?: boolean;
   /** Time continuously waiting/stalled before reporting. Default 10000ms. */
   mediaStallMs?: number;
-  /** Long-frame duration that counts as a main-thread stall. Default 200ms. */
+  /** Blocking duration that counts as a main-thread stall. Default 200ms. */
   mainThreadStallMs?: number;
   /** Stalls inside the window that trip a report. Default 3. */
   mainThreadStallCount?: number;
@@ -2396,12 +2396,6 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const observer = new PerformanceObserver((list) => {
         if (reported || document.visibilityState === "hidden") return;
         for (const entry of list.getEntries()) {
-          if (entry.duration < stallMs) continue;
-          const now = Date.now();
-          stallTimes = stallTimes.filter((at) => now - at < stallWindowMs);
-          stallTimes.push(now);
-          if (stallTimes.length < stallCount) continue;
-          reported = true;
           const animationFrame = entry as PerformanceEntry & {
             blockingDuration?: number;
             scripts?: Array<{
@@ -2411,6 +2405,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               sourceURL?: string;
             }>;
           };
+          const blockingDuration =
+            entry.entryType === "long-animation-frame" &&
+            animationFrame.blockingDuration !== undefined
+              ? animationFrame.blockingDuration
+              : entry.duration;
+          if (blockingDuration < stallMs) continue;
+          const now = Date.now();
+          stallTimes = stallTimes.filter((at) => now - at < stallWindowMs);
+          stallTimes.push(now);
+          if (stallTimes.length < stallCount) continue;
+          reported = true;
           const script = [...(animationFrame.scripts ?? [])].sort(
             (left, right) => (right.duration ?? 0) - (left.duration ?? 0),
           )[0];

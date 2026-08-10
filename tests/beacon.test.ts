@@ -2446,9 +2446,10 @@ describe("ambient watchdog signals", () => {
               [210, 240, 280].map(
                 (duration) =>
                   ({
+                    blockingDuration: duration,
                     duration,
                     entryType: "long-animation-frame",
-                  }) as PerformanceEntry,
+                  }) as unknown as PerformanceEntry,
               ),
           } as PerformanceObserverEntryList,
           this as unknown as PerformanceObserver,
@@ -2469,6 +2470,45 @@ describe("ambient watchdog signals", () => {
         entryType: "long-animation-frame",
         stallCount: "3",
       });
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("ignores long animation frames with no blocking duration", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(): void {
+        this.callback(
+          {
+            getEntries: () =>
+              [228, 450, 1002].map(
+                (duration) =>
+                  ({
+                    blockingDuration: 0,
+                    duration,
+                    entryType: "long-animation-frame",
+                  }) as unknown as PerformanceEntry,
+              ),
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "main_thread_stall")).toHaveLength(0);
     } finally {
       globalThis.PerformanceObserver = original;
     }
