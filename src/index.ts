@@ -4325,6 +4325,32 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const reportedFocusLoss = new Set<string>();
       const reportedModalEscapes = new WeakSet<Element>();
       const modalTimers = new Set<ReturnType<typeof setTimeout>>();
+      const modalVisibility = new WeakMap<Element, boolean>();
+      const knownModals = new Set<Element>();
+      const isRenderedModal = (modal: Element): boolean => {
+        if (!modal.isConnected || !modal.matches(MODAL_SELECTOR)) return false;
+        let current: Element | null = modal;
+        while (current !== null) {
+          if (
+            current.hasAttribute("hidden") ||
+            current.hasAttribute("inert") ||
+            current.getAttribute("aria-hidden")?.toLowerCase() === "true"
+          ) {
+            return false;
+          }
+          const style = getComputedStyle(current);
+          if (
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            style.visibility === "collapse" ||
+            style.contentVisibility === "hidden"
+          ) {
+            return false;
+          }
+          current = current.parentElement;
+        }
+        return true;
+      };
       const reportModalEscape = (
         modal: Element,
         active: Element | null,
@@ -4350,11 +4376,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         );
       };
       const openModals = (): Element[] =>
-        Array.from(document.querySelectorAll(MODAL_SELECTOR));
+        Array.from(document.querySelectorAll(MODAL_SELECTOR)).filter(
+          isRenderedModal,
+        );
       const checkInitialModalFocus = (modal: Element): void => {
         const timer = setTimeout(() => {
           modalTimers.delete(timer);
-          if (!modal.isConnected || !modal.matches(MODAL_SELECTOR)) return;
+          if (!isRenderedModal(modal)) return;
           const active =
             document.activeElement instanceof Element
               ? document.activeElement
@@ -4363,6 +4391,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           reportModalEscape(modal, active, "initial-focus-missing");
         }, MODAL_FOCUS_SETTLE_MS);
         modalTimers.add(timer);
+      };
+      const updateModalVisibility = (modal: Element): void => {
+        knownModals.add(modal);
+        const visible = isRenderedModal(modal);
+        const wasVisible = modalVisibility.get(modal) === true;
+        modalVisibility.set(modal, visible);
+        if (visible && !wasVisible) checkInitialModalFocus(modal);
+      };
+      const registerModals = (root: Element): void => {
+        if (root.matches(MODAL_SELECTOR)) updateModalVisibility(root);
+        for (const modal of Array.from(root.querySelectorAll(MODAL_SELECTOR))) {
+          updateModalVisibility(modal);
+        }
       };
       const onFocusIn = (event: FocusEvent): void => {
         const target = event.target;
@@ -4403,29 +4444,43 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         signals.modalFocusEscape !== false &&
         typeof MutationObserver !== "undefined"
       ) {
-        for (const modal of openModals()) checkInitialModalFocus(modal);
+        for (const modal of Array.from(
+          document.querySelectorAll(MODAL_SELECTOR),
+        )) {
+          updateModalVisibility(modal);
+        }
         modalObserver = new MutationObserver((records) => {
           for (const record of records) {
             if (
               record.type === "attributes" &&
-              record.target instanceof Element &&
-              record.target.matches(MODAL_SELECTOR)
+              record.target instanceof Element
             ) {
-              checkInitialModalFocus(record.target);
+              const target = record.target;
+              if (knownModals.has(target) || target.matches(MODAL_SELECTOR)) {
+                updateModalVisibility(target);
+              }
+              for (const modal of knownModals) {
+                if (modal !== target && target.contains(modal)) {
+                  updateModalVisibility(modal);
+                }
+              }
             }
             for (const added of Array.from(record.addedNodes)) {
               if (!(added instanceof Element)) continue;
-              if (added.matches(MODAL_SELECTOR)) checkInitialModalFocus(added);
-              for (const modal of Array.from(
-                added.querySelectorAll(MODAL_SELECTOR),
-              )) {
-                checkInitialModalFocus(modal);
-              }
+              registerModals(added);
             }
           }
         });
         modalObserver.observe(document.documentElement, {
-          attributeFilter: ["aria-modal", "open"],
+          attributeFilter: [
+            "aria-hidden",
+            "aria-modal",
+            "class",
+            "hidden",
+            "inert",
+            "open",
+            "style",
+          ],
           attributes: true,
           childList: true,
           subtree: true,
@@ -4437,6 +4492,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         modalObserver?.disconnect();
         for (const timer of modalTimers) clearTimeout(timer);
         modalTimers.clear();
+        knownModals.clear();
       });
     }
 

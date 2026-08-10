@@ -2190,6 +2190,56 @@ describe("ambient watchdog signals", () => {
     opener.remove();
   });
 
+  test("ignores a mounted hidden aria-modal", async () => {
+    const opener = document.createElement("button");
+    document.body.append(opener);
+    opener.focus();
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("role", "dialog");
+    modal.style.display = "none";
+    modal.append(document.createElement("button"));
+    document.body.append(modal);
+    const { beacon, sent } = makeWatchdogBeacon();
+    await new Promise((resolve) => setTimeout(resolve, 130));
+    await beacon.flush();
+    expect(signalsSent(sent, "modal_focus_escape")).toHaveLength(0);
+    modal.remove();
+    opener.remove();
+  });
+
+  test("checks focus when a mounted hidden modal becomes visible", async () => {
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("role", "dialog");
+    modal.style.display = "none";
+    modal.append(document.createElement("button"));
+    document.body.append(modal);
+    const { beacon, sent } = makeWatchdogBeacon();
+    modal.style.display = "";
+    await new Promise((resolve) => setTimeout(resolve, 130));
+    await beacon.flush();
+    expect(signalsSent(sent, "modal_focus_escape")).toHaveLength(1);
+    modal.remove();
+  });
+
+  test("accepts focus when a mounted hidden modal becomes visible", async () => {
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("role", "dialog");
+    modal.style.display = "none";
+    const close = document.createElement("button");
+    modal.append(close);
+    document.body.append(modal);
+    const { beacon, sent } = makeWatchdogBeacon();
+    modal.style.display = "";
+    close.focus();
+    await new Promise((resolve) => setTimeout(resolve, 130));
+    await beacon.flush();
+    expect(signalsSent(sent, "modal_focus_escape")).toHaveLength(0);
+    modal.remove();
+  });
+
   test("reports enforced CSP violations without reporting report-only policy", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const reportOnly = new Event("securitypolicyviolation");
