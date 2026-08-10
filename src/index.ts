@@ -379,6 +379,11 @@ export type BeaconSignals = {
   /** Quiet period before an open, visible EventSource counts as stalled.
    *  Default 60000ms. */
   stalledStreamMs?: number;
+  /** Endpoints that are quiet by design — push topics that only emit when
+   *  something changes, so silence is health, not failure. Streams whose URL
+   *  matches a string prefix or RegExp here are exempt from the
+   *  stalled-stream signal (flap detection still applies). */
+  quietStreams?: Array<RegExp | string>;
   /** An `aria-busy`/`role="status"`/`role="progressbar"` element still
    *  visible after `stuckLoadingMs` — a load that silently hung.
    *  Default true. */
@@ -4702,9 +4707,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const reportedStreams = new Set<string>();
     const errorsByEndpoint = new Map<string, number[]>();
     const reportedFlappingStreams = new Set<string>();
+    // Quiet-by-design endpoints: push topics whose silence is health, not
+    // failure. Matched against the stream's full URL — prefix or RegExp.
+    const quietStream = (url: string): boolean =>
+      (signals.quietStreams ?? []).some((pattern) =>
+        typeof pattern === "string"
+          ? url.startsWith(pattern) || shortUrl(url).startsWith(pattern)
+          : pattern.test(url),
+      );
     const instrumentSource = (
       source: EventSource,
       endpointLabel: string,
+      sourceUrl: string,
     ): void => {
       let stallTimer: ReturnType<typeof setTimeout> | undefined;
       const disarm = (): void => {
@@ -4712,6 +4726,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       };
       const check = (): void => {
         if (signals.stalledStreams === false) return;
+        if (quietStream(sourceUrl)) return;
         if (source.readyState !== OriginalEventSource.OPEN) return;
         if (document.visibilityState === "hidden") {
           arm();
@@ -4799,7 +4814,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           target,
           args,
         ) as unknown as EventSource;
-        instrumentSource(source, shortUrl(String(args[0])));
+        instrumentSource(source, shortUrl(String(args[0])), String(args[0]));
 
         return source;
       },
