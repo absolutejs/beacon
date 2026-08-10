@@ -2240,6 +2240,48 @@ describe("ambient watchdog signals", () => {
     modal.remove();
   });
 
+  test("ignores trigger restoration while a modal is being removed", async () => {
+    const outside = document.createElement("button");
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("role", "dialog");
+    const close = document.createElement("button");
+    modal.append(close);
+    document.body.append(outside, modal);
+    const { beacon, sent } = makeWatchdogBeacon();
+    close.focus();
+    await new Promise((resolve) => setTimeout(resolve, 130));
+
+    outside.focus();
+    queueMicrotask(() => modal.remove());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await beacon.flush();
+    expect(signalsSent(sent, "modal_focus_escape")).toHaveLength(0);
+    outside.remove();
+  });
+
+  test("reports focus that remains outside a still-open modal", async () => {
+    const outside = document.createElement("button");
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    modal.setAttribute("role", "dialog");
+    const close = document.createElement("button");
+    modal.append(close);
+    document.body.append(outside, modal);
+    const { beacon, sent } = makeWatchdogBeacon();
+    close.focus();
+    await new Promise((resolve) => setTimeout(resolve, 130));
+
+    outside.focus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await beacon.flush();
+    const events = signalsSent(sent, "modal_focus_escape");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.reason).toBe("escaped");
+    modal.remove();
+    outside.remove();
+  });
+
   test("reports enforced CSP violations without reporting report-only policy", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const reportOnly = new Event("securitypolicyviolation");

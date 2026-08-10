@@ -4413,7 +4413,21 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             modals.length > 0 &&
             !modals.some((modal) => modal.contains(target))
           ) {
-            reportModalEscape(modals[modals.length - 1]!, target, "escaped");
+            const modal = modals[modals.length - 1]!;
+            // Frameworks commonly restore focus before their render pass
+            // removes a closing modal. Confirm the escape after microtasks and
+            // DOM updates settle instead of reporting that transient state.
+            const timer = setTimeout(() => {
+              modalTimers.delete(timer);
+              if (!isRenderedModal(modal)) return;
+              const active =
+                document.activeElement instanceof Element
+                  ? document.activeElement
+                  : null;
+              if (active !== null && modal.contains(active)) return;
+              reportModalEscape(modal, active, "escaped");
+            }, 0);
+            modalTimers.add(timer);
           }
         }
         lastDialogFocus =
