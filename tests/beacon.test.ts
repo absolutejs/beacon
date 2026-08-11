@@ -2,6 +2,7 @@
  * Runtime tests for @absolutejs/beacon (under happy-dom).
  */
 import { afterEach, describe, expect, test } from "bun:test";
+import { computeFingerprint } from "@absolutejs/errors";
 import {
   BEACON_ATTRIBUTE,
   BEACON_TRACE_HEADER,
@@ -1936,9 +1937,50 @@ describe("auto-instrumentation", () => {
     await beacon.flush();
 
     const stack = sent[0]?.events[0]?.stack;
+    expect(sent[0]?.events[0]?.groupingKey).toBeUndefined();
     expect(stack).toContain("applicationConsoleCaller");
     expect(stack).not.toContain("emitSignal");
     expect(stack).not.toContain("wrappedConsole");
+  });
+
+  test("console errors group by normalized message and application caller", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, console: true },
+        project: "web",
+        signals: { consoleErrors: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const invitationFailure = (attempt: number) => {
+      console.error(`Failed to send invitation attempt ${attempt}`);
+    };
+    const invitationLoadFailure = () => {
+      console.error("Failed to load invitations");
+    };
+
+    invitationFailure(12);
+    invitationFailure(34);
+    invitationLoadFailure();
+    await beacon.flush();
+
+    const events = sent[0]?.events ?? [];
+    expect(events).toHaveLength(3);
+    expect(events.every((event) => event.groupingKey === undefined)).toBeTrue();
+    const fingerprints = await Promise.all(
+      events.map((event) =>
+        computeFingerprint({
+          message: event.message,
+          name: event.name,
+          ...(event.stack === undefined ? {} : { stack: event.stack }),
+        }),
+      ),
+    );
+    expect(fingerprints[0]).toBe(fingerprints[1]);
+    expect(fingerprints[2]).not.toBe(fingerprints[0]);
   });
 
   test("console stack trimming works without Error.captureStackTrace", async () => {

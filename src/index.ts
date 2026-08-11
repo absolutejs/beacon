@@ -1795,6 +1795,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     extra?: Record<string, unknown>,
     stackBoundary?: CallableFunction,
     fallbackFramesToDrop = 1,
+    useDefaultFingerprint = false,
   ): void => {
     const error = new Error(message);
     const captureStackTrace = (
@@ -1822,7 +1823,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         .join("\n");
     }
     captureException(error, {
-      groupingKey: signalGroupingKey(signalTags),
+      ...(useDefaultFingerprint
+        ? {}
+        : { groupingKey: signalGroupingKey(signalTags) }),
       level: "warning",
       tags: signalTags,
       ...(traceId !== undefined ? { traceId } : {}),
@@ -2757,6 +2760,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               undefined,
               wrappedConsole,
               2,
+              true,
             );
           if (text !== "") reportErrorClick?.("ConsoleError");
           inSignalConsole = false;
