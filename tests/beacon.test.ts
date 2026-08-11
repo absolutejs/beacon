@@ -2761,6 +2761,110 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("suppresses a click-adjacent layout shift when the browser misses recent input", async () => {
+    const original = globalThis.PerformanceObserver;
+    let callback: PerformanceObserverCallback | undefined;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(next: PerformanceObserverCallback) {
+        this.callback = next;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type === "layout-shift") callback = this.callback;
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const button = document.createElement("button");
+      document.body.append(button);
+      const { beacon, sent } = makeWatchdogBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+      });
+      button.click();
+      const shifted = document.createElement("div");
+      shifted.className = "pause-panel";
+      const activeCallback = callback;
+      const observer = new FakePerformanceObserver(() => undefined);
+      activeCallback?.(
+        {
+          getEntries: () => [
+            {
+              duration: 0,
+              entryType: "layout-shift",
+              hadRecentInput: false,
+              sources: [{ node: shifted }],
+              startTime: performance.now(),
+              value: 0.18,
+            } as unknown as PerformanceEntry,
+          ],
+        } as PerformanceObserverEntryList,
+        observer as unknown as PerformanceObserver,
+      );
+      await beacon.flush();
+      expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(0);
+      button.remove();
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("reports a layout shift outside Beacon's recent-input fallback window", async () => {
+    const original = globalThis.PerformanceObserver;
+    let callback: PerformanceObserverCallback | undefined;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(next: PerformanceObserverCallback) {
+        this.callback = next;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type === "layout-shift") callback = this.callback;
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const button = document.createElement("button");
+      document.body.append(button);
+      const { beacon, sent } = makeWatchdogBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+      });
+      button.click();
+      const shifted = document.createElement("div");
+      shifted.className = "late-panel";
+      const activeCallback = callback;
+      const observer = new FakePerformanceObserver(() => undefined);
+      activeCallback?.(
+        {
+          getEntries: () => [
+            {
+              duration: 0,
+              entryType: "layout-shift",
+              hadRecentInput: false,
+              sources: [{ node: shifted }],
+              startTime: performance.now() + 501,
+              value: 0.18,
+            } as unknown as PerformanceEntry,
+          ],
+        } as PerformanceObserverEntryList,
+        observer as unknown as PerformanceObserver,
+      );
+      await beacon.flush();
+      expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(1);
+      button.remove();
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
   test("reports a marked application root that settles blank", async () => {
     const root = document.createElement("main");
     root.setAttribute(BEACON_ATTRIBUTE.APP_ROOT, "portal");

@@ -1497,6 +1497,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const STALE_RELEASE_HISTORY_LIMIT = 5;
   const FORM_FRUSTRATION_THRESHOLD = 3;
   const FORM_FRUSTRATION_WINDOW_MS = 60000;
+  const LAYOUT_SHIFT_RECENT_INTERACTION_MS = 500;
   const FORM_INVALID_BURST_GAP_MS = 100;
   const SIGNAL_TEXT_MAX = 180;
   const slowResponseMs = signals?.slowResponseMs ?? SLOW_RESPONSE_DEFAULT_MS;
@@ -1513,7 +1514,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
   let recentInteraction:
-    | { at: number; target: string; type: "click" | "submit" | "keyboard" }
+    | {
+        at: number;
+        performanceAt: number;
+        target: string;
+        type: "click" | "submit" | "keyboard";
+      }
     | undefined;
   let reportErrorClick: ((errorName: string) => void) | null = null;
   let reportFormAbandonmentOnNavigation: (() => void) | null = null;
@@ -2850,6 +2856,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (signals === null) return;
       recentInteraction = {
         at: Date.now(),
+        performanceAt: performance.now(),
         target: targetName,
         type: "click",
       };
@@ -2924,6 +2931,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       beginAction("submit", target);
       recentInteraction = {
         at: Date.now(),
+        performanceAt: performance.now(),
         target,
         type: "submit",
       };
@@ -2936,6 +2944,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       beginAction("keyboard", targetName);
       recentInteraction = {
         at: Date.now(),
+        performanceAt: performance.now(),
         target: targetName,
         type: "keyboard",
       };
@@ -3734,7 +3743,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             sources?: Array<{ node?: Node | null }>;
             value?: number;
           };
-          if (entry.hadRecentInput === true || (entry.value ?? 0) < minimum)
+          const interactionAgeMs =
+            recentInteraction === undefined
+              ? undefined
+              : entry.startTime - recentInteraction.performanceAt;
+          const beaconSawRecentInput =
+            interactionAgeMs !== undefined &&
+            interactionAgeMs >= 0 &&
+            interactionAgeMs <= LAYOUT_SHIFT_RECENT_INTERACTION_MS;
+          if (
+            entry.hadRecentInput === true ||
+            beaconSawRecentInput ||
+            (entry.value ?? 0) < minimum
+          )
             continue;
           const targets = (entry.sources ?? [])
             .map(({ node }) =>
