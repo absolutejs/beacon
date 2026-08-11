@@ -2678,6 +2678,7 @@ describe("ambient watchdog signals", () => {
 
   test("reports repeated visible main-thread stalls", async () => {
     const original = globalThis.PerformanceObserver;
+    let durations = [210, 240, 280];
     class FakePerformanceObserver {
       private readonly callback: PerformanceObserverCallback;
       constructor(callback: PerformanceObserverCallback) {
@@ -2688,7 +2689,7 @@ describe("ambient watchdog signals", () => {
         this.callback(
           {
             getEntries: () =>
-              [210, 240, 280].map(
+              durations.map(
                 (duration) =>
                   ({
                     blockingDuration: duration,
@@ -2712,9 +2713,17 @@ describe("ambient watchdog signals", () => {
       const events = signalsSent(sent, "main_thread_stall");
       expect(events).toHaveLength(1);
       expect(events[0]?.tags).toMatchObject({
+        blockingDurationMs: "280",
         entryType: "long-animation-frame",
         stallCount: "3",
       });
+      durations = [810, 820, 830];
+      const second = makeWatchdogBeacon();
+      await second.beacon.flush();
+      const secondEvents = signalsSent(second.sent, "main_thread_stall");
+      expect(secondEvents).toHaveLength(1);
+      expect(secondEvents[0]?.tags?.blockingDurationMs).toBe("830");
+      expect(secondEvents[0]?.groupingKey).toBe(events[0]?.groupingKey);
     } finally {
       globalThis.PerformanceObserver = original;
     }

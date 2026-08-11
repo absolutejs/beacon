@@ -1093,6 +1093,7 @@ const UUID_PATH_SEGMENT =
 const LONG_IDENTIFIER_SEGMENT = /\b(?:[0-9a-f]{16,}|\d{8,})\b/giu;
 const VOLATILE_SIGNAL_TAGS = new Set([
   "actionId",
+  "blockingDurationMs",
   "blockerLocations",
   "blockerScope",
   "closeCount",
