@@ -320,6 +320,78 @@ describe("Core Web Vitals", () => {
     });
     expect(vitals[0]?.at).toBeNumber();
   });
+
+  test("bounds TBT to ten seconds from FCP", async () => {
+    const originalObserver = globalThis.PerformanceObserver;
+    const originalGetEntriesByName = performance.getEntriesByName;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "longtask") return;
+        this.callback(
+          {
+            getEntries: () =>
+              [
+                { duration: 100, startTime: 500 },
+                { duration: 1_000, startTime: 15_000 },
+              ] as PerformanceEntry[],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    performance.getEntriesByName = ((name: string) =>
+      name === "first-contentful-paint"
+        ? ([{ startTime: 100 }] as PerformanceEntry[])
+        : []) as typeof performance.getEntriesByName;
+    try {
+      const vitals: WebVital[] = [];
+      const ignore = (): void => {};
+      const beacon = track(
+        createBeacon({
+          instrument: ALL_OFF,
+          project: "web",
+          vitals: {
+            transport: (vital) => {
+              vitals.push(vital);
+            },
+            webVitals: {
+              onCLS: ignore,
+              onFCP: ignore,
+              onINP: ignore,
+              onLCP: ignore,
+              onTTFB: ignore,
+            },
+          },
+        }),
+      );
+      window.dispatchEvent(new Event("pagehide"));
+      await tick();
+
+      expect(vitals).toHaveLength(1);
+      expect(vitals[0]).toMatchObject({
+        attribution: {
+          measurementWindow: "FCP",
+          measurementWindowMs: 10_000,
+        },
+        name: "TBT",
+        value: 50,
+      });
+      await beacon.close();
+    } finally {
+      performance.getEntriesByName = originalGetEntriesByName;
+      globalThis.PerformanceObserver = originalObserver;
+    }
+  });
 });
 
 describe("enrichment", () => {
@@ -2523,6 +2595,31 @@ describe("ambient watchdog signals", () => {
       }
       disconnect(): void {}
       observe(options: PerformanceObserverInit): void {
+        if (options.type === "long-animation-frame") {
+          this.callback(
+            {
+              getEntries: () => [
+                {
+                  blockingDuration: 240,
+                  duration: 400,
+                  entryType: "long-animation-frame",
+                  scripts: [
+                    {
+                      duration: 220,
+                      functionName: "saveDeal",
+                      invoker: "BUTTON.onclick",
+                      sourceURL:
+                        "https://app.example/assets/deal.js?token=secret",
+                    },
+                  ],
+                  startTime: 90,
+                } as unknown as PerformanceEntry,
+              ],
+            } as PerformanceObserverEntryList,
+            this as unknown as PerformanceObserver,
+          );
+          return;
+        }
         if (options.type !== "event") return;
         const button = document.createElement("button");
         button.setAttribute(BEACON_ATTRIBUTE.NAME, "save-deal");
@@ -2534,6 +2631,9 @@ describe("ambient watchdog signals", () => {
                 entryType: "event",
                 interactionId: 41,
                 name: "click",
+                processingEnd: 300,
+                processingStart: 180,
+                startTime: 100,
                 target: button,
               } as unknown as PerformanceEntry,
             ],
@@ -2554,10 +2654,20 @@ describe("ambient watchdog signals", () => {
       await beacon.flush();
       const events = signalsSent(sent, "slow_interaction");
       expect(events).toHaveLength(1);
+      expect(events[0]?.message).toContain("click took 1240ms");
       expect(events[0]?.tags).toMatchObject({
+        blockingDurationMs: "240",
+        blockingEntryType: "long-animation-frame",
+        blockingFrameDurationMs: "400",
         durationMs: "1240",
         eventType: "click",
+        inputDelayMs: "80",
         interactionId: "41",
+        presentationDelayMs: "1040",
+        processingDurationMs: "120",
+        scriptFunction: "saveDeal",
+        scriptInvoker: "BUTTON.onclick",
+        scriptSource: "/assets/deal.js",
         target: "button[save-deal]",
       });
     } finally {

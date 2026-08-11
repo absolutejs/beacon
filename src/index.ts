@@ -498,7 +498,7 @@ export type WebVital = {
   at: number;
   /** Optional deployment environment copied from the Beacon configuration. */
   environment?: string;
-  /** The 5 Core Web Vitals, plus TBT (Total Blocking Time — long-task overage). */
+  /** The 5 Core Web Vitals, plus TBT measured for 10 seconds from FCP. */
   name: "LCP" | "INP" | "CLS" | "FCP" | "TTFB" | "TBT";
   /** Metric value (ms for LCP/INP/FCP/TTFB; unitless for CLS). */
   value: number;
@@ -1233,33 +1233,61 @@ const formStateChanged = (
 
 const VITAL_NAMES = new Set(["LCP", "INP", "CLS", "FCP", "TTFB", "TBT"]);
 const LONG_TASK_MS = 50;
+const TBT_WINDOW_MS = 10_000;
 const TBT_GOOD_MS = 200;
 const TBT_POOR_MS = 600;
 
-// Observe long tasks (>50ms) and report Total Blocking Time (sum of per-task
-// overage) once on page-hide — the jank / INP precursor the CWV libs don't give.
+// Observe long tasks (>50ms) and report their overage during a bounded window
+// from FCP. This is intentionally not accumulated for the page lifetime: doing
+// so makes long-lived pages incomparable and can misattribute later activity.
 const observeLongTasks = (
   report: (metric: WebVitalMetric) => void,
   navigationType: string,
 ): void => {
   if (typeof PerformanceObserver === "undefined") return;
-  let totalBlockingMs = 0;
-  let count = 0;
+  const longTasks: Array<{ duration: number; startTime: number }> = [];
   let reported = false;
   try {
     const observer = new PerformanceObserver((list) => {
+      const windowStart =
+        performance.getEntriesByName("first-contentful-paint")[0]?.startTime ??
+        0;
+      const windowEnd = windowStart + TBT_WINDOW_MS;
       for (const entry of list.getEntries()) {
-        totalBlockingMs += Math.max(0, entry.duration - LONG_TASK_MS);
-        count += 1;
+        if (entry.startTime < windowStart || entry.startTime >= windowEnd)
+          continue;
+        longTasks.push({
+          duration: entry.duration,
+          startTime: entry.startTime,
+        });
       }
     });
     observer.observe({ buffered: true, type: "longtask" });
     const flush = (): void => {
-      if (reported || count === 0) return;
+      if (reported) return;
+      const firstContentfulPaint = performance.getEntriesByName(
+        "first-contentful-paint",
+      )[0]?.startTime;
+      const windowStart = firstContentfulPaint ?? 0;
+      const windowEnd = windowStart + TBT_WINDOW_MS;
+      const tasksInWindow = longTasks.filter(
+        ({ startTime }) => startTime >= windowStart && startTime < windowEnd,
+      );
+      if (tasksInWindow.length === 0) return;
       reported = true;
-      const value = Math.round(totalBlockingMs);
+      const value = Math.round(
+        tasksInWindow.reduce(
+          (total, { duration }) => total + Math.max(0, duration - LONG_TASK_MS),
+          0,
+        ),
+      );
       report({
-        id: `tbt-${navigationType}-${value}`,
+        attribution: {
+          measurementWindow:
+            firstContentfulPaint === undefined ? "navigation" : "FCP",
+          measurementWindowMs: TBT_WINDOW_MS,
+        },
+        id: `tbt-${navigationType}-${TBT_WINDOW_MS}-${value}`,
         name: "TBT",
         navigationType,
         rating:
@@ -1297,6 +1325,8 @@ const vitalAttribution = (
     "largestShiftTarget",
     "largestShiftValue",
     "loadState",
+    "measurementWindow",
+    "measurementWindowMs",
     "presentationDelay",
     "processingDuration",
     "resourceLoadDelay",
@@ -3739,11 +3769,57 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   ) {
     const minimum = signals.slowInteractionMs ?? SLOW_INTERACTION_DEFAULT_MS;
     const reported = new Set<number>();
+    type BlockingFrame = PerformanceEntry & {
+      blockingDuration?: number;
+      scripts?: Array<{
+        duration?: number;
+        functionName?: string;
+        invoker?: string;
+        sourceURL?: string;
+      }>;
+    };
+    const blockingFrames: BlockingFrame[] = [];
+    const recordBlockingFrames = (entries: PerformanceEntry[]): void => {
+      for (const entry of entries) blockingFrames.push(entry as BlockingFrame);
+      if (blockingFrames.length > 50)
+        blockingFrames.splice(0, blockingFrames.length - 50);
+    };
+    let blockingObserver: PerformanceObserver | undefined;
+    try {
+      blockingObserver = new PerformanceObserver((list) => {
+        recordBlockingFrames(list.getEntries());
+      });
+      const supportedTypes = PerformanceObserver.supportedEntryTypes;
+      if (supportedTypes?.includes("long-animation-frame")) {
+        blockingObserver.observe({
+          buffered: true,
+          type: "long-animation-frame",
+        });
+      } else if (supportedTypes?.includes("longtask")) {
+        blockingObserver.observe({ buffered: true, type: "longtask" });
+      } else if (supportedTypes === undefined || supportedTypes.length === 0) {
+        blockingObserver.observe({
+          buffered: true,
+          type: "long-animation-frame",
+        });
+      } else {
+        blockingObserver.disconnect();
+        blockingObserver = undefined;
+      }
+      if (blockingObserver !== undefined) {
+        cleanups.push(() => blockingObserver?.disconnect());
+      }
+    } catch {
+      blockingObserver?.disconnect();
+      blockingObserver = undefined;
+    }
     try {
       const observer = new PerformanceObserver((list) => {
         for (const raw of list.getEntries()) {
           const entry = raw as PerformanceEntry & {
             interactionId?: number;
+            processingEnd?: number;
+            processingStart?: number;
             target?: Node | null;
           };
           if (
@@ -3759,12 +3835,82 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           const key = entry.interactionId;
           if (reported.has(key)) continue;
           reported.add(key);
+          if (blockingObserver !== undefined) {
+            recordBlockingFrames(blockingObserver.takeRecords());
+          }
+          const interactionEnd = entry.startTime + entry.duration;
+          const overlappingFrame = blockingFrames
+            .filter(
+              (frame) =>
+                frame.startTime < interactionEnd &&
+                frame.startTime + frame.duration > entry.startTime,
+            )
+            .sort((left, right) => {
+              const leftBlocking =
+                left.blockingDuration ??
+                Math.max(0, left.duration - LONG_TASK_MS);
+              const rightBlocking =
+                right.blockingDuration ??
+                Math.max(0, right.duration - LONG_TASK_MS);
+              return rightBlocking - leftBlocking;
+            })[0];
+          const script = [...(overlappingFrame?.scripts ?? [])].sort(
+            (left, right) => (right.duration ?? 0) - (left.duration ?? 0),
+          )[0];
+          const hasPhaseTiming =
+            typeof entry.processingStart === "number" &&
+            typeof entry.processingEnd === "number";
           emitSignal(
-            `Slow interaction — ${entry.name} blocked for ${Math.round(entry.duration)}ms — ${shortUrl(location.href)}`,
+            `Slow interaction — ${entry.name} took ${Math.round(entry.duration)}ms — ${shortUrl(location.href)}`,
             {
+              ...(hasPhaseTiming
+                ? {
+                    inputDelayMs: String(
+                      Math.round(
+                        Math.max(0, entry.processingStart! - entry.startTime),
+                      ),
+                    ),
+                    presentationDelayMs: String(
+                      Math.round(
+                        Math.max(0, interactionEnd - entry.processingEnd!),
+                      ),
+                    ),
+                    processingDurationMs: String(
+                      Math.round(
+                        Math.max(
+                          0,
+                          entry.processingEnd! - entry.processingStart!,
+                        ),
+                      ),
+                    ),
+                  }
+                : { phaseAttribution: "unavailable" }),
+              ...(overlappingFrame === undefined
+                ? { blockingFrameAttribution: "not-observed" }
+                : {
+                    blockingDurationMs: String(
+                      Math.round(
+                        overlappingFrame.blockingDuration ??
+                          Math.max(0, overlappingFrame.duration - LONG_TASK_MS),
+                      ),
+                    ),
+                    blockingEntryType: overlappingFrame.entryType,
+                    blockingFrameDurationMs: String(
+                      Math.round(overlappingFrame.duration),
+                    ),
+                  }),
               durationMs: String(Math.round(entry.duration)),
               eventType: entry.name,
               interactionId: String(entry.interactionId),
+              ...(script?.functionName === undefined
+                ? {}
+                : { scriptFunction: script.functionName }),
+              ...(script?.invoker === undefined
+                ? {}
+                : { scriptInvoker: script.invoker }),
+              ...(script?.sourceURL === undefined
+                ? {}
+                : { scriptSource: shortUrl(script.sourceURL) }),
               signal: BEACON_SIGNAL.SLOW_INTERACTION,
               target,
             },

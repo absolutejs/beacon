@@ -165,9 +165,10 @@ beacon.captureMessage("checkout started", "info");
   become replay-linked warnings. Normal socket closes, page teardown, hidden-tab
   SSE errors, and successfully replaced service workers are exempt.
 - **Attributed reliability signals** — Event Timing identifies genuinely slow
-  interactions (without treating an ordinary click timer as latency), Layout
-  Instability names shifted elements, and long animation frames include their
-  worst script when the browser exposes it. Successful HTTP responses can be
+  interactions and separates input delay, handler time, and presentation delay.
+  Overlapping long animation frames include their worst script when the browser
+  exposes it; missing browser attribution is labeled explicitly. Layout
+  Instability names shifted elements. Successful HTTP responses can be
   classified through the host-owned `instrument.classifyResponse` callback for
   GraphQL-style errors without Beacon retaining response bodies.
 - **Lifecycle and platform gaps** — marked empty application roots, marked dirty
