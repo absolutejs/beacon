@@ -1070,11 +1070,31 @@ const shortUrl = (url: string): string => {
   }
 };
 
+const BFCACHE_LOCATION_MAX = 240;
+const bfcacheLocation = (value: unknown): string | undefined => {
+  if (typeof value !== "string" || value === "") return undefined;
+  try {
+    const parsed = new URL(value, location.href);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return undefined;
+    }
+
+    return `${parsed.origin}${normalizeSignalIdentityPart(parsed.pathname)}`.slice(
+      0,
+      BFCACHE_LOCATION_MAX,
+    );
+  } catch {
+    return undefined;
+  }
+};
+
 const UUID_PATH_SEGMENT =
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
 const LONG_IDENTIFIER_SEGMENT = /\b(?:[0-9a-f]{16,}|\d{8,})\b/giu;
 const VOLATILE_SIGNAL_TAGS = new Set([
   "actionId",
+  "blockerLocations",
+  "blockerScope",
   "closeCount",
   "currentRelease",
   "durationMs",
@@ -2577,28 +2597,71 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         navigation.notRestoredReasons != null
       ) {
         const reasons = new Set<string>();
-        const visit = (node: unknown): void => {
+        const blockers: Array<{
+          depth: number;
+          location?: string;
+          reasons: string[];
+        }> = [];
+        const visit = (node: unknown, depth = 0): void => {
           if (node === null || typeof node !== "object") return;
           const detail = node as {
             children?: unknown[];
+            src?: unknown;
+            url?: unknown;
             reasons?: Array<{ reason?: unknown }>;
           };
-          for (const reason of detail.reasons ?? []) {
-            if (typeof reason.reason === "string") reasons.add(reason.reason);
+          const nodeReasons = (detail.reasons ?? [])
+            .map((reason) => reason.reason)
+            .filter(
+              (reason): reason is string =>
+                typeof reason === "string" && reason !== "masked",
+            )
+            .slice(0, 10);
+          for (const reason of nodeReasons) reasons.add(reason);
+          if (nodeReasons.length > 0 && blockers.length < 10) {
+            const location = bfcacheLocation(detail.url ?? detail.src);
+            blockers.push({
+              depth,
+              ...(location === undefined ? {} : { location }),
+              reasons: nodeReasons,
+            });
           }
-          for (const child of detail.children ?? []) visit(child);
+          for (const child of detail.children ?? []) visit(child, depth + 1);
         };
         visit(navigation.notRestoredReasons);
-        const reasonList = [...reasons]
-          .filter((reason) => reason !== "masked")
-          .slice(0, 10);
+        const reasonList = [...reasons].slice(0, 10);
         if (reasonList.length > 0) {
+          const hasTopDocumentBlocker = blockers.some(
+            (blocker) => blocker.depth === 0,
+          );
+          const hasChildFrameBlocker = blockers.some(
+            (blocker) => blocker.depth > 0,
+          );
+          const blockerScope =
+            hasTopDocumentBlocker && hasChildFrameBlocker
+              ? "mixed"
+              : hasChildFrameBlocker
+                ? "child-frame"
+                : "top-document";
+          const blockerLocations = [
+            ...new Set(
+              blockers
+                .map((blocker) => blocker.location)
+                .filter((value): value is string => value !== undefined),
+            ),
+          ].slice(0, 10);
           emitSignal(
             `Back-forward cache blocked — ${reasonList.join(", ")} — ${shortUrl(location.href)}`,
             {
+              ...(blockerLocations.length === 0
+                ? {}
+                : { blockerLocations: blockerLocations.join(",") }),
+              blockerScope,
               reasons: reasonList.join(","),
               signal: BEACON_SIGNAL.BFCACHE_BLOCKED,
             },
+            undefined,
+            { bfcacheBlockers: blockers },
           );
         }
       }

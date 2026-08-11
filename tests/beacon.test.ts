@@ -2283,6 +2283,103 @@ describe("ambient watchdog signals", () => {
     await beacon.flush();
   };
 
+  test("attributes bfcache blockers without retaining URL secrets", async () => {
+    const ownDescriptor = Object.getOwnPropertyDescriptor(
+      performance,
+      "getEntriesByType",
+    );
+    const originalGetEntriesByType =
+      performance.getEntriesByType.bind(performance);
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) =>
+        type === "navigation"
+          ? [
+              {
+                notRestoredReasons: {
+                  children: [
+                    {
+                      children: [],
+                      reasons: [{ reason: "web-lock" }],
+                      src: "https://video.example/embed/demo?token=secret#private",
+                    },
+                  ],
+                  reasons: [{ reason: "unload-listener" }],
+                  url: "https://app.example/deals/123e4567-e89b-42d3-a456-426614174000?member=private#section",
+                },
+                type: "back_forward",
+              },
+            ]
+          : originalGetEntriesByType(type),
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      const events = signalsSent(sent, "bfcache_blocked");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        blockerLocations:
+          "https://app.example/deals/:id,https://video.example/embed/demo",
+        blockerScope: "mixed",
+        reasons: "unload-listener,web-lock",
+      });
+      expect(events[0]?.extra?.bfcacheBlockers).toEqual([
+        {
+          depth: 0,
+          location: "https://app.example/deals/:id",
+          reasons: ["unload-listener"],
+        },
+        {
+          depth: 1,
+          location: "https://video.example/embed/demo",
+          reasons: ["web-lock"],
+        },
+      ]);
+    } finally {
+      if (ownDescriptor === undefined) {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      } else {
+        Object.defineProperty(performance, "getEntriesByType", ownDescriptor);
+      }
+    }
+  });
+
+  test("does not report privacy-masked bfcache reasons", async () => {
+    const ownDescriptor = Object.getOwnPropertyDescriptor(
+      performance,
+      "getEntriesByType",
+    );
+    const originalGetEntriesByType =
+      performance.getEntriesByType.bind(performance);
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) =>
+        type === "navigation"
+          ? [
+              {
+                notRestoredReasons: {
+                  children: [],
+                  reasons: [{ reason: "masked" }],
+                  url: "https://private.example/path?secret=value",
+                },
+                type: "back_forward",
+              },
+            ]
+          : originalGetEntriesByType(type),
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "bfcache_blocked")).toHaveLength(0);
+    } finally {
+      if (ownDescriptor === undefined) {
+        Reflect.deleteProperty(performance, "getEntriesByType");
+      } else {
+        Object.defineProperty(performance, "getEntriesByType", ownDescriptor);
+      }
+    }
+  });
+
   test("reports a scroll jail when scrollable content never moves", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const scrolling = document.scrollingElement ?? document.documentElement;
