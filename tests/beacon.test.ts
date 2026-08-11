@@ -2305,7 +2305,7 @@ describe("ambient watchdog signals", () => {
       Object.defineProperty(wheel, "ctrlKey", { value: false });
       document.body.dispatchEvent(wheel);
     }
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    await new Promise((resolve) => setTimeout(resolve, 550));
     await beacon.flush();
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
   });
@@ -2336,10 +2336,44 @@ describe("ambient watchdog signals", () => {
     // wheel listener in the burst has observed the old main-thread position.
     setTimeout(() => {
       scrolling.scrollTop = 100;
-    }, 0);
-    await new Promise((resolve) => setTimeout(resolve, 70));
+    }, 250);
+    await new Promise((resolve) => setTimeout(resolve, 550));
     await beacon.flush();
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
+  });
+
+  test("waits for wheel input to go quiet before reporting a scroll jail", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    Object.defineProperty(scrolling, "scrollHeight", {
+      configurable: true,
+      value: 3000,
+    });
+    Object.defineProperty(scrolling, "clientHeight", {
+      configurable: true,
+      value: VIEWPORT_H,
+    });
+    Object.defineProperty(scrolling, "scrollTop", {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    const dispatchWheel = (): void => {
+      const wheel = new Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "deltaY", { value: 100 });
+      Object.defineProperty(wheel, "ctrlKey", { value: false });
+      document.body.dispatchEvent(wheel);
+    };
+    for (let index = 0; index < 8; index += 1) dispatchWheel();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    dispatchWheel();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
   });
 
   test("reports focus dropped to body when a dialog unmounts", async () => {

@@ -1471,10 +1471,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX = 0.8;
   const SCROLL_JAIL_EVENT_COUNT = 8;
   const SCROLL_JAIL_WINDOW_MS = 2000;
-  // Passive wheel listeners can run before Chromium's compositor scroll is
-  // reflected in main-thread scrollTop. Give the default action time to
-  // settle before deciding that a scrollable element is actually immobile.
-  const SCROLL_JAIL_SETTLE_MS = 50;
+  // Passive wheel listeners can run before a composited scroll is reflected
+  // in main-thread scrollTop. Mobile Safari has taken roughly 250ms in live
+  // replays, so require a full quiet period beyond that observed delay before
+  // deciding that a scrollable element is actually immobile.
+  const SCROLL_JAIL_SETTLE_MS = 500;
   const SCROLL_JAIL_BOUNDARY_TOLERANCE_PX = 2;
   const AUTH_FAILURE_STORM_DEFAULT_COUNT = 4;
   const AUTH_FAILURE_STORM_DEFAULT_WINDOW_MS = 30000;
@@ -4477,7 +4478,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       let jailScroller: Element | null = null;
       let jailSettleTimer: ReturnType<typeof setTimeout> | undefined;
       const reportedScrollers = new Set<string>();
+      const clearJailSettle = (): void => {
+        if (jailSettleTimer === undefined) return;
+        clearTimeout(jailSettleTimer);
+        jailSettleTimer = undefined;
+      };
       const onWheel = (event: WheelEvent): void => {
+        // A jail is only confirmed after wheel input has gone quiet. Further
+        // input may still be feeding a composited scroll that main-thread
+        // scrollTop has not exposed yet.
+        clearJailSettle();
         if (event.ctrlKey || event.defaultPrevented || event.deltaY === 0) {
           jailBurst = [];
 
@@ -4515,12 +4525,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           first === undefined ||
           jailBurst.some((entry) => entry.position !== first.position) ||
           scroller.scrollTop !== first.position;
-        jailBurst = [];
-        if (moved) return;
+        if (moved) {
+          jailBurst = [];
+
+          return;
+        }
         const startingPosition = first.position;
-        if (jailSettleTimer !== undefined) clearTimeout(jailSettleTimer);
         jailSettleTimer = setTimeout(() => {
           jailSettleTimer = undefined;
+          jailBurst = [];
           if (!scroller.isConnected || scroller.scrollTop !== startingPosition)
             return;
           const canStillMove = scrollingDown
@@ -4542,7 +4555,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       document.addEventListener("wheel", onWheel, { passive: true });
       cleanups.push(() => {
         document.removeEventListener("wheel", onWheel);
-        if (jailSettleTimer !== undefined) clearTimeout(jailSettleTimer);
+        clearJailSettle();
       });
     }
 
