@@ -3183,6 +3183,53 @@ describe("ambient watchdog signals", () => {
     document.elementFromPoint = originalFromPoint;
   });
 
+  test("does not report a control clipped below a scrolling ancestor", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scroller = document.createElement("main");
+    scroller.style.overflowY = "auto";
+    setRect(scroller, rectOf(0, 390, 0, 220));
+    const input = document.createElement("input");
+    setRect(input, rectOf(12, 378, 250, 290));
+    scroller.append(input);
+    const normalFlowSibling = document.createElement("div");
+    normalFlowSibling.className = "consent-copy";
+    setRect(normalFlowSibling, rectOf(0, 390, 220, 420));
+    document.body.append(scroller, normalFlowSibling);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => normalFlowSibling;
+    await settle(beacon);
+    expect(signalsSent(sent, "occluded_control")).toHaveLength(0);
+    scroller.remove();
+    normalFlowSibling.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
+  test("reports a genuinely covered visible portion of a clipped control", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scroller = document.createElement("main");
+    scroller.style.overflowY = "auto";
+    setRect(scroller, rectOf(0, 390, 0, 160));
+    const button = document.createElement("button");
+    button.className = "partly-visible";
+    setRect(button, rectOf(12, 180, 130, 170));
+    scroller.append(button);
+    const cover = document.createElement("div");
+    cover.className = "real-cover";
+    setRect(cover, rectOf(12, 180, 130, 160));
+    document.body.append(scroller, cover);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => cover;
+    await settle(beacon);
+    const events = signalsSent(sent, "occluded_control");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.coveredBy).toBe("div.real-cover");
+    scroller.remove();
+    cover.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
   test.each([
     ["aria-hidden", "true"],
     ["inert", ""],

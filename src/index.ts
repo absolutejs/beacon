@@ -3149,6 +3149,65 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       visit(body, null);
     };
 
+    type VisibleRect = {
+      bottom: number;
+      left: number;
+      right: number;
+      top: number;
+    };
+    const clipsAxis = (overflow: string): boolean =>
+      overflow === "auto" ||
+      overflow === "scroll" ||
+      overflow === "hidden" ||
+      overflow === "clip";
+    const visibleControlRect = (
+      control: Element,
+      rect: DOMRect,
+      viewportWidth: number,
+      viewportHeight: number,
+    ): VisibleRect | null => {
+      const visible: VisibleRect = {
+        bottom: Math.min(rect.bottom, viewportHeight),
+        left: Math.max(rect.left, 0),
+        right: Math.min(rect.right, viewportWidth),
+        top: Math.max(rect.top, 0),
+      };
+      for (
+        let ancestor = control.parentElement;
+        ancestor;
+        ancestor = ancestor.parentElement
+      ) {
+        const style = window.getComputedStyle(ancestor);
+        const clipX = clipsAxis(style.overflowX);
+        const clipY = clipsAxis(style.overflowY);
+        if (!clipX && !clipY) continue;
+        const ancestorRect = ancestor.getBoundingClientRect();
+        if (clipX) {
+          visible.left = Math.max(visible.left, ancestorRect.left);
+          visible.right = Math.min(visible.right, ancestorRect.right);
+        }
+        if (clipY) {
+          visible.top = Math.max(visible.top, ancestorRect.top);
+          visible.bottom = Math.min(visible.bottom, ancestorRect.bottom);
+        }
+        if (visible.left >= visible.right || visible.top >= visible.bottom) {
+          return null;
+        }
+      }
+      const centerX = (rect.left + rect.right) / 2;
+      const centerY = (rect.top + rect.bottom) / 2;
+      if (
+        centerX < visible.left ||
+        centerX > visible.right ||
+        centerY < visible.top ||
+        centerY > visible.bottom
+      ) {
+        return null;
+      }
+
+      return visible;
+    };
+
     const scanForOcclusion = (): void => {
       if (typeof document.elementFromPoint !== "function") return;
       // While an overlay owns the page, covering the rest of it is the point.
@@ -3164,19 +3223,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         if (isScanExempt(control) || hasHiddenAncestor(control, true)) continue;
         const rect = control.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
-        // Partially offscreen controls are the layout-overflow detector's job.
-        if (
-          rect.left < 0 ||
-          rect.top < 0 ||
-          rect.right > viewportWidth ||
-          rect.bottom > viewportHeight
-        ) {
-          continue;
-        }
+        const visibleRect = visibleControlRect(
+          control,
+          rect,
+          viewportWidth,
+          viewportHeight,
+        );
+        if (visibleRect === null) continue;
         sampled += 1;
         const top = document.elementFromPoint(
-          (rect.left + rect.right) / 2,
-          (rect.top + rect.bottom) / 2,
+          (visibleRect.left + visibleRect.right) / 2,
+          (visibleRect.top + visibleRect.bottom) / 2,
         );
         if (
           top === null ||
@@ -3188,14 +3245,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         }
         const topRect = top.getBoundingClientRect();
         const overlapX =
-          Math.min(rect.right, topRect.right) -
-          Math.max(rect.left, topRect.left);
+          Math.min(visibleRect.right, topRect.right) -
+          Math.max(visibleRect.left, topRect.left);
         const overlapY =
-          Math.min(rect.bottom, topRect.bottom) -
-          Math.max(rect.top, topRect.top);
+          Math.min(visibleRect.bottom, topRect.bottom) -
+          Math.max(visibleRect.top, topRect.top);
         const coverage =
           (Math.max(overlapX, 0) * Math.max(overlapY, 0)) /
-          (rect.width * rect.height);
+          ((visibleRect.right - visibleRect.left) *
+            (visibleRect.bottom - visibleRect.top));
         if (coverage < OCCLUSION_COVERAGE_MIN) continue;
         reportScanIssue(
           control,
