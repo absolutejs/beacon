@@ -1500,6 +1500,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const LAYOUT_SHIFT_RECENT_INTERACTION_MS = 500;
   const FORM_INVALID_BURST_GAP_MS = 100;
   const SIGNAL_TEXT_MAX = 180;
+  const NON_TEXT_ENTRY_INPUT_TYPES = new Set([
+    "button",
+    "checkbox",
+    "color",
+    "file",
+    "hidden",
+    "image",
+    "radio",
+    "range",
+    "reset",
+    "submit",
+  ]);
   const slowResponseMs = signals?.slowResponseMs ?? SLOW_RESPONSE_DEFAULT_MS;
   const navigationResponseMs = Math.max(
     DEAD_CLICK_WINDOW_MS,
@@ -1523,6 +1535,28 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     | undefined;
   let reportErrorClick: ((errorName: string) => void) | null = null;
   let reportFormAbandonmentOnNavigation: (() => void) | null = null;
+  const focusedEditable = (): HTMLElement | null => {
+    const active = document.activeElement;
+    if (active instanceof HTMLTextAreaElement) return active;
+    if (active instanceof HTMLInputElement) {
+      return NON_TEXT_ENTRY_INPUT_TYPES.has(active.type) ? null : active;
+    }
+    if (active instanceof HTMLElement && active.isContentEditable)
+      return active;
+    return null;
+  };
+  const mobileKeyboardViewportActive = (): boolean => {
+    const visualViewport = window.visualViewport;
+    return (
+      visualViewport !== undefined &&
+      visualViewport !== null &&
+      visualViewport.height > 0 &&
+      window.innerHeight > 0 &&
+      visualViewport.height <
+        window.innerHeight * KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX &&
+      focusedEditable() !== null
+    );
+  };
   // Set by the settled-scan watchdogs so SPA navigations recorded by the
   // history instrumentation also schedule a post-settle scan.
   let overflowScanOnNavigation: (() => void) | null = null;
@@ -3758,6 +3792,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           if (
             entry.hadRecentInput === true ||
             beaconSawRecentInput ||
+            mobileKeyboardViewportActive() ||
             (entry.value ?? 0) < minimum
           )
             continue;
@@ -4372,12 +4407,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         ) {
           return;
         }
-        const active = document.activeElement;
-        const editable =
-          active instanceof HTMLInputElement ||
-          active instanceof HTMLTextAreaElement ||
-          (active instanceof HTMLElement && active.isContentEditable);
-        if (!editable || !(active instanceof HTMLElement)) return;
+        const active = focusedEditable();
+        if (active === null) return;
         const rect = active.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) return;
         const viewportTop = visualViewport.offsetTop;

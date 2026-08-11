@@ -2907,6 +2907,100 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("suppresses only layout shifts while a mobile keyboard viewport is active", async () => {
+    const originalObserver = globalThis.PerformanceObserver;
+    const originalViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const originalInnerHeight = Object.getOwnPropertyDescriptor(
+      window,
+      "innerHeight",
+    );
+    let callback: PerformanceObserverCallback | undefined;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(next: PerformanceObserverCallback) {
+        this.callback = next;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type === "layout-shift") callback = this.callback;
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    const viewport = Object.assign(new EventTarget(), {
+      height: 500,
+      offsetLeft: 0,
+      offsetTop: 0,
+      width: 390,
+    });
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: viewport,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 800,
+    });
+    const textarea = document.createElement("textarea");
+    document.body.append(textarea);
+    textarea.focus();
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const observer = new FakePerformanceObserver(() => undefined);
+      const emitShift = (target: Element): void => {
+        callback?.(
+          {
+            getEntries: () => [
+              {
+                duration: 0,
+                entryType: "layout-shift",
+                hadRecentInput: false,
+                sources: [{ node: target }],
+                startTime: performance.now() + 4_000,
+                value: 0.24,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          observer as unknown as PerformanceObserver,
+        );
+      };
+
+      const keyboardShift = document.createElement("div");
+      keyboardShift.className = "keyboard-settling-content";
+      emitShift(keyboardShift);
+      await beacon.flush();
+      expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(0);
+
+      viewport.height = 800;
+      const genuineShift = document.createElement("div");
+      genuineShift.className = "late-content";
+      emitShift(genuineShift);
+      await beacon.flush();
+      const events = signalsSent(sent, "disruptive_layout_shift");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags?.target).toBe("div.late-content");
+    } finally {
+      textarea.remove();
+      globalThis.PerformanceObserver = originalObserver;
+      if (originalViewport === undefined) {
+        Reflect.deleteProperty(window, "visualViewport");
+      } else {
+        Object.defineProperty(window, "visualViewport", originalViewport);
+      }
+      if (originalInnerHeight === undefined) {
+        Reflect.deleteProperty(window, "innerHeight");
+      } else {
+        Object.defineProperty(window, "innerHeight", originalInnerHeight);
+      }
+    }
+  });
+
   test("reports a marked application root that settles blank", async () => {
     const root = document.createElement("main");
     root.setAttribute(BEACON_ATTRIBUTE.APP_ROOT, "portal");
