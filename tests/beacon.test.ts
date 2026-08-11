@@ -3035,6 +3035,65 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("uses layout entry time to suppress only resize-adjacent shifts", async () => {
+    const original = globalThis.PerformanceObserver;
+    let callback: PerformanceObserverCallback | undefined;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(next: PerformanceObserverCallback) {
+        this.callback = next;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type === "layout-shift") callback = this.callback;
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      window.dispatchEvent(new Event("resize"));
+      const resizedAt = performance.now();
+      const observer = new FakePerformanceObserver(() => undefined);
+      const emitShift = (target: Element, startTime: number): void => {
+        callback?.(
+          {
+            getEntries: () => [
+              {
+                duration: 0,
+                entryType: "layout-shift",
+                hadRecentInput: false,
+                sources: [{ node: target }],
+                startTime,
+                value: 0.12,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          observer as unknown as PerformanceObserver,
+        );
+      };
+
+      const responsiveReflow = document.createElement("aside");
+      responsiveReflow.className = "responsive-sidebar";
+      emitShift(responsiveReflow, resizedAt);
+      await beacon.flush();
+      expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(0);
+
+      const delayedShift = document.createElement("div");
+      delayedShift.className = "late-content";
+      emitShift(delayedShift, resizedAt + 501);
+      await beacon.flush();
+      const events = signalsSent(sent, "disruptive_layout_shift");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags?.target).toBe("div.late-content");
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
   test("reports a marked application root that settles blank", async () => {
     const root = document.createElement("main");
     root.setAttribute(BEACON_ATTRIBUTE.APP_ROOT, "portal");

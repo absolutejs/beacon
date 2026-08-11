@@ -1499,6 +1499,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const FORM_FRUSTRATION_THRESHOLD = 3;
   const FORM_FRUSTRATION_WINDOW_MS = 60000;
   const LAYOUT_SHIFT_RECENT_INTERACTION_MS = 500;
+  const LAYOUT_SHIFT_VIEWPORT_RESIZE_SETTLE_MS = 500;
+  const VIEWPORT_RESIZE_HISTORY_LIMIT = 8;
   const FORM_INVALID_BURST_GAP_MS = 100;
   const SIGNAL_TEXT_MAX = 180;
   const NON_TEXT_ENTRY_INPUT_TYPES = new Set([
@@ -3774,6 +3776,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const minimum =
       signals.disruptiveLayoutShiftMin ?? DISRUPTIVE_LAYOUT_SHIFT_DEFAULT_MIN;
     const reported = new Set<string>();
+    let viewportResizeTimes: number[] = [];
+    const recordViewportResize = (): void => {
+      viewportResizeTimes.push(performance.now());
+      if (viewportResizeTimes.length > VIEWPORT_RESIZE_HISTORY_LIMIT) {
+        viewportResizeTimes = viewportResizeTimes.slice(
+          -VIEWPORT_RESIZE_HISTORY_LIMIT,
+        );
+      }
+    };
+    window.addEventListener("resize", recordViewportResize);
+    window.visualViewport?.addEventListener("resize", recordViewportResize);
     try {
       const observer = new PerformanceObserver((list) => {
         for (const raw of list.getEntries()) {
@@ -3790,9 +3803,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             interactionAgeMs !== undefined &&
             interactionAgeMs >= 0 &&
             interactionAgeMs <= LAYOUT_SHIFT_RECENT_INTERACTION_MS;
+          const resizeAdjacent = viewportResizeTimes.some((resizedAt) => {
+            const resizeAgeMs = entry.startTime - resizedAt;
+            return (
+              resizeAgeMs >= 0 &&
+              resizeAgeMs <= LAYOUT_SHIFT_VIEWPORT_RESIZE_SETTLE_MS
+            );
+          });
           if (
             entry.hadRecentInput === true ||
             beaconSawRecentInput ||
+            resizeAdjacent ||
             mobileKeyboardViewportActive() ||
             (entry.value ?? 0) < minimum
           )
@@ -3817,8 +3838,20 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         }
       });
       observer.observe({ buffered: true, type: "layout-shift" });
-      cleanups.push(() => observer.disconnect());
+      cleanups.push(() => {
+        observer.disconnect();
+        window.removeEventListener("resize", recordViewportResize);
+        window.visualViewport?.removeEventListener(
+          "resize",
+          recordViewportResize,
+        );
+      });
     } catch {
+      window.removeEventListener("resize", recordViewportResize);
+      window.visualViewport?.removeEventListener(
+        "resize",
+        recordViewportResize,
+      );
       // Layout Instability API unsupported.
     }
   }
