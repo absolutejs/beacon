@@ -4721,11 +4721,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       let jailBurst: Array<{ at: number; position: number }> = [];
       let jailScroller: Element | null = null;
       let jailSettleTimer: ReturnType<typeof setTimeout> | undefined;
+      let scrollActivityGeneration = 0;
+      let jailStartingScrollGeneration = 0;
       const reportedScrollers = new Set<string>();
       const clearJailSettle = (): void => {
         if (jailSettleTimer === undefined) return;
         clearTimeout(jailSettleTimer);
         jailSettleTimer = undefined;
+      };
+      const onDocumentScroll = (): void => {
+        scrollActivityGeneration += 1;
       };
       const onWheel = (event: WheelEvent): void => {
         // A jail is only confirmed after wheel input has gone quiet. Further
@@ -4762,6 +4767,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         jailBurst = jailBurst.filter(
           (entry) => now - entry.at < SCROLL_JAIL_WINDOW_MS,
         );
+        if (jailBurst.length === 0) {
+          jailStartingScrollGeneration = scrollActivityGeneration;
+        }
         jailBurst.push({ at: now, position: scroller.scrollTop });
         if (jailBurst.length < SCROLL_JAIL_EVENT_COUNT) return;
         const first = jailBurst[0];
@@ -4778,6 +4786,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         jailSettleTimer = setTimeout(() => {
           jailSettleTimer = undefined;
           jailBurst = [];
+          if (scrollActivityGeneration !== jailStartingScrollGeneration) return;
           if (!scroller.isConnected || scroller.scrollTop !== startingPosition)
             return;
           const canStillMove = scrollingDown
@@ -4796,8 +4805,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           );
         }, SCROLL_JAIL_SETTLE_MS);
       };
+      document.addEventListener("scroll", onDocumentScroll, {
+        capture: true,
+        passive: true,
+      });
       document.addEventListener("wheel", onWheel, { passive: true });
       cleanups.push(() => {
+        document.removeEventListener("scroll", onDocumentScroll, {
+          capture: true,
+        });
         document.removeEventListener("wheel", onWheel);
         clearJailSettle();
       });

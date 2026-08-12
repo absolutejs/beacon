@@ -2584,6 +2584,45 @@ describe("ambient watchdog signals", () => {
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
   });
 
+  test("does not report a newly targeted pane while the latched pane scrolls", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const main = document.createElement("main");
+    const sidebar = document.createElement("nav");
+    main.style.overflowY = "auto";
+    sidebar.style.overflowY = "auto";
+    for (const element of [main, sidebar]) {
+      Object.defineProperty(element, "scrollHeight", {
+        configurable: true,
+        value: 2000,
+      });
+      Object.defineProperty(element, "clientHeight", {
+        configurable: true,
+        value: 500,
+      });
+      Object.defineProperty(element, "scrollTop", {
+        configurable: true,
+        value: 0,
+        writable: true,
+      });
+    }
+    document.body.append(main, sidebar);
+    for (let index = 0; index < 8; index += 1) {
+      const wheel = new Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "deltaY", { value: 100 });
+      Object.defineProperty(wheel, "ctrlKey", { value: false });
+      sidebar.dispatchEvent(wheel);
+      if (index === 3) {
+        main.scrollTop = 400;
+        main.dispatchEvent(new Event("scroll"));
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
+    main.remove();
+    sidebar.remove();
+  });
+
   test("waits for wheel input to go quiet before reporting a scroll jail", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const scrolling = document.scrollingElement ?? document.documentElement;
