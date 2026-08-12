@@ -1469,6 +1469,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const MEDIA_STALL_DEFAULT_MS = 10000;
   const THRASHED_CURSOR_DEFAULT_REVERSALS = 8;
   const THRASHED_CURSOR_WINDOW_MS = 2000;
+  // Count an intentional change of direction, not a sign change from harmless
+  // perpendicular jitter. A cosine of -0.5 is a turn of at least 120 degrees.
+  const THRASHED_CURSOR_REVERSAL_COSINE = -0.5;
   const NAVIGATION_RESPONSE_DEFAULT_MS = 8000;
   const LAYOUT_OVERFLOW_SETTLE_DEFAULT_MS = 600;
   const LAYOUT_OVERFLOW_MAX_REPORTS_DEFAULT = 5;
@@ -4728,7 +4731,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         for (let index = 1; index < points.length; index += 1) {
           const prior = points[index - 1]!;
           const current = points[index]!;
-          if (prior.dx * current.dx < 0 || prior.dy * current.dy < 0)
+          const dot = prior.dx * current.dx + prior.dy * current.dy;
+          const magnitudeProduct =
+            Math.hypot(prior.dx, prior.dy) * Math.hypot(current.dx, current.dy);
+          if (dot / magnitudeProduct <= THRASHED_CURSOR_REVERSAL_COSINE)
             reversals += 1;
         }
         if (reversals < reversalThreshold) return;

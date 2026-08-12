@@ -2283,6 +2283,16 @@ describe("ambient watchdog signals", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     await beacon.flush();
   };
+  const movePointer = (x: number, y: number): void => {
+    document.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        clientX: x,
+        clientY: y,
+        pointerType: "mouse",
+      }),
+    );
+  };
 
   test("attributes bfcache blockers without retaining URL secrets", async () => {
     const ownDescriptor = Object.getOwnPropertyDescriptor(
@@ -2472,6 +2482,70 @@ describe("ambient watchdog signals", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     await beacon.flush();
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
+  });
+
+  test("does not treat minor-axis pointer jitter as cursor thrashing", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { thrashedCursorReversals: 3 },
+    });
+    for (const [x, y] of [
+      [0, 100],
+      [20, 102],
+      [40, 98],
+      [60, 102],
+      [80, 98],
+      [100, 102],
+    ] as const) {
+      movePointer(x, y);
+    }
+    await beacon.flush();
+    expect(signalsSent(sent, "thrashed_cursor")).toHaveLength(0);
+  });
+
+  test("does not treat a smooth curved pointer path as cursor thrashing", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { thrashedCursorReversals: 3 },
+    });
+    for (const [x, y] of [
+      [0, 0],
+      [20, 0],
+      [34, 14],
+      [34, 34],
+      [20, 48],
+      [0, 48],
+      [-14, 34],
+    ] as const) {
+      movePointer(x, y);
+    }
+    await beacon.flush();
+    expect(signalsSent(sent, "thrashed_cursor")).toHaveLength(0);
+  });
+
+  test("reports repeated substantial back-and-forth pointer reversals", async () => {
+    const target = document.createElement("div");
+    target.className = "busy-panel";
+    document.body.append(target);
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { thrashedCursorReversals: 3 },
+    });
+    for (const x of [0, 40, 0, 40, 0]) {
+      target.dispatchEvent(
+        new PointerEvent("pointermove", {
+          bubbles: true,
+          clientX: x,
+          clientY: 100,
+          pointerType: "mouse",
+        }),
+      );
+    }
+    await beacon.flush();
+    const events = signalsSent(sent, "thrashed_cursor");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      reversals: "3",
+      target: "div.busy-panel",
+    });
+    target.remove();
   });
 
   test("reports focus dropped to body when a dialog unmounts", async () => {
