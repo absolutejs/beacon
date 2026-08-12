@@ -142,6 +142,8 @@ beacon.captureMessage("checkout started", "info");
   inverted brand/media surfaces use `data-beacon-theme="allow"`. Loading UI
   participates through native `aria-busy`/`role="progressbar"` semantics or
   `data-beacon-loading`, without coupling the SDK to framework class names.
+  Long-running loaders can set `data-beacon-loading-timeout="60000"` to
+  override the global stuck-loading deadline for that element only.
 - **Browser capability failures** — rejected clipboard writes are observed even
   when application code catches them (contents are never read), visible WebGL
   contexts that do not restore after `webglcontextlost` become warnings, and a

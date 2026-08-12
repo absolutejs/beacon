@@ -4025,6 +4025,27 @@ describe("ambient watchdog signals", () => {
     spinner.remove();
   });
 
+  test("honors an element-specific stuck-loading deadline", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 1 },
+    });
+    const stream = document.createElement("div");
+    stream.setAttribute("aria-busy", "true");
+    stream.setAttribute(BEACON_ATTRIBUTE.LOADING_TIMEOUT, "80");
+    setRect(stream, rectOf(0, 400, 0, 240));
+    document.body.append(stream);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await settle(beacon);
+    expect(signalsSent(sent, "stuck_loading")).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle(beacon);
+    const events = signalsSent(sent, "stuck_loading");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.deadlineMs).toBe("80");
+    stream.remove();
+  });
+
   test("reports a marked iframe that never loads", async () => {
     const frame = document.createElement("iframe");
     const originalDispatch = frame.dispatchEvent.bind(frame);

@@ -87,6 +87,8 @@ export const BEACON_ATTRIBUTE = {
   EMBED: "data-beacon-embed",
   /** Marks loading UI that should participate in the stuck-loading watchdog. */
   LOADING: "data-beacon-loading",
+  /** Overrides the stuck-loading deadline for one loading element, in ms. */
+  LOADING_TIMEOUT: "data-beacon-loading-timeout",
   /** Names a form whose dirty navigation should be reported as abandonment. */
   FORM: "data-beacon-form",
   /** Names media whose user-visible playback should be watched. */
@@ -3079,8 +3081,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   //     to (nearly) the same color as their opaque background — the classic
   //     theme-token bug. Gradients/images and translucent stacks are skipped.
   //   stuck loading — `aria-busy`/`role="progressbar"` indicators still
-  //     visible after `stuckLoadingMs` (checked on a slow poll as well, so a
-  //     spinner that never resolves is caught without any user action).
+  //     visible after `stuckLoadingMs` (or their element-specific
+  //     `data-beacon-loading-timeout` override). Checked on a slow poll as
+  //     well, so a spinner that never resolves is caught without any action.
   // Shared discipline: spill/measure values live in tags, never in messages,
   // so occurrences group into one issue per element, kind, and viewport
   // bucket; reports are deduped and capped per page load; subtrees under
@@ -3721,6 +3724,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     //   poll catches spinners that hang while the user does nothing at all.
     const loadingFirstSeen = new WeakMap<Element, number>();
     const reportedStuckLoading = new WeakSet<Element>();
+    const loadingDeadlineMs = (indicator: Element): number => {
+      const configured = indicator
+        .getAttribute(BEACON_ATTRIBUTE.LOADING_TIMEOUT)
+        ?.trim();
+      if (!configured) return stuckLoadingMs;
+      const parsed = Number(configured);
+
+      return Number.isSafeInteger(parsed) && parsed >= 0
+        ? parsed
+        : stuckLoadingMs;
+    };
     const checkStuckLoading = (): void => {
       if (document.visibilityState === "hidden") return;
       const indicators = document.querySelectorAll(
@@ -3736,8 +3750,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           loadingFirstSeen.set(indicator, now);
           continue;
         }
+        const deadlineMs = loadingDeadlineMs(indicator);
         if (
-          now - firstSeen < stuckLoadingMs ||
+          now - firstSeen < deadlineMs ||
           reportedStuckLoading.has(indicator)
         ) {
           continue;
@@ -3747,7 +3762,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           indicator,
           BEACON_SIGNAL.STUCK_LOADING,
           `Stuck loading — ${describeElement(indicator)} never resolved`,
-          { visibleMs: String(now - firstSeen) },
+          {
+            deadlineMs: String(deadlineMs),
+            visibleMs: String(now - firstSeen),
+          },
         );
       }
     };
