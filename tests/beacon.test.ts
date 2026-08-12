@@ -3761,6 +3761,43 @@ describe("ambient watchdog signals", () => {
     spinner.remove();
   });
 
+  test("reports only the outer loading boundary for nested indicators", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 40 },
+    });
+    const boundary = document.createElement("div");
+    boundary.setAttribute("aria-busy", "true");
+    const spinner = document.createElement("div");
+    spinner.setAttribute("aria-busy", "true");
+    boundary.append(spinner);
+    setRect(boundary, rectOf(0, 80, 0, 80));
+    setRect(spinner, rectOf(20, 60, 20, 60));
+    document.body.append(boundary);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await settle(beacon);
+    const events = signalsSent(sent, "stuck_loading");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags?.target).toBe("div");
+    boundary.remove();
+  });
+
+  test("ignores loading indicators hidden from the accessibility tree", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 40 },
+    });
+    const spinner = document.createElement("div");
+    spinner.setAttribute("aria-busy", "true");
+    spinner.setAttribute("aria-hidden", "true");
+    setRect(spinner, rectOf(0, 40, 0, 40));
+    document.body.append(spinner);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await settle(beacon);
+    expect(signalsSent(sent, "stuck_loading")).toHaveLength(0);
+    spinner.remove();
+  });
+
   test("reports a control fully covered by an unrelated element", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const button = document.createElement("button");

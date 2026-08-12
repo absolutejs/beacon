@@ -3730,11 +3730,27 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     //   poll catches spinners that hang while the user does nothing at all.
     const loadingFirstSeen = new WeakMap<Element, number>();
     const reportedStuckLoading = new WeakSet<Element>();
+    const loadingIndicatorSelector = `[aria-busy="true"], [role="progressbar"], [${BEACON_ATTRIBUTE.LOADING}]`;
     const isPersistentDeterminateProgress = (indicator: Element): boolean =>
       indicator.getAttribute("role") === "progressbar" &&
       indicator.hasAttribute("aria-valuenow") &&
       indicator.getAttribute("aria-busy") !== "true" &&
       !indicator.hasAttribute(BEACON_ATTRIBUTE.LOADING);
+    const hasTrackedLoadingAncestor = (indicator: Element): boolean => {
+      let ancestor = indicator.parentElement?.closest(loadingIndicatorSelector);
+      while (ancestor !== null && ancestor !== undefined) {
+        if (
+          !isPersistentDeterminateProgress(ancestor) &&
+          !isScanExempt(ancestor) &&
+          !hasHiddenAncestor(ancestor)
+        ) {
+          return true;
+        }
+        ancestor = ancestor.parentElement?.closest(loadingIndicatorSelector);
+      }
+
+      return false;
+    };
     const loadingDeadlineMs = (indicator: Element): number => {
       const configured = indicator
         .getAttribute(BEACON_ATTRIBUTE.LOADING_TIMEOUT)
@@ -3748,13 +3764,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
     const checkStuckLoading = (): void => {
       if (document.visibilityState === "hidden") return;
-      const indicators = document.querySelectorAll(
-        `[aria-busy="true"], [role="progressbar"], [${BEACON_ATTRIBUTE.LOADING}]`,
-      );
+      const indicators = document.querySelectorAll(loadingIndicatorSelector);
       const now = Date.now();
       for (const indicator of Array.from(indicators)) {
         if (isPersistentDeterminateProgress(indicator)) continue;
         if (isScanExempt(indicator)) continue;
+        if (hasHiddenAncestor(indicator)) continue;
+        if (hasTrackedLoadingAncestor(indicator)) continue;
         const rect = indicator.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) continue;
         const firstSeen = loadingFirstSeen.get(indicator);
