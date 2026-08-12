@@ -757,6 +757,32 @@ describe("auto-instrumentation", () => {
     }
   });
 
+  test("recognizes opening a native file picker as a click response", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+        project: "web",
+        signals: { deadClicks: true, rageClicks: false },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const input = document.createElement("input");
+    input.type = "file";
+    const button = document.createElement("button");
+    button.addEventListener("click", () => input.click());
+    document.body.append(input, button);
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 1600));
+    await beacon.flush();
+    expect(sent).toHaveLength(0);
+    input.remove();
+    button.remove();
+    await beacon.close();
+  });
+
   test("does not report modifier-assisted anchor navigation as a dead click", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(

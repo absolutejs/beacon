@@ -1600,6 +1600,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let networkRequestCount = 0;
   let externalNavigationCount = 0;
   let externalShareCount = 0;
+  let nativeFilePickerCount = 0;
   let clipboardWriteCount = 0;
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
@@ -2298,6 +2299,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const networkRequestsBefore = networkRequestCount;
     const externalNavigationsBefore = externalNavigationCount;
     const externalSharesBefore = externalShareCount;
+    const nativeFilePickersBefore = nativeFilePickerCount;
     const clipboardWritesBefore = clipboardWriteCount;
     let routerAcceptedNavigation = false;
     let mutated = false;
@@ -2318,6 +2320,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       networkRequestCount !== networkRequestsBefore ||
       externalNavigationCount !== externalNavigationsBefore ||
       externalShareCount !== externalSharesBefore ||
+      nativeFilePickerCount !== nativeFilePickersBefore ||
       clipboardWriteCount !== clipboardWritesBefore;
     const finish = (didRespond: boolean, navigationStalled = false): void => {
       if (finished) return;
@@ -3026,6 +3029,27 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         } catch {
           // Some browser hosts expose a non-writable share function.
         }
+      }
+
+      // A custom attachment button commonly delegates to a visually hidden
+      // `<input type="file">`. Opening the browser-owned picker does not mutate
+      // the page, move focus, or start a request, and the picker may remain open
+      // past the dead-click window. Count a completed programmatic activation
+      // as the response without inspecting the selected file or its contents.
+      const inputPrototype = HTMLInputElement.prototype;
+      const originalInputClick = inputPrototype.click;
+      const wrappedInputClick = function (this: HTMLInputElement): void {
+        originalInputClick.call(this);
+        if (this.type === "file") nativeFilePickerCount += 1;
+      };
+      try {
+        inputPrototype.click = wrappedInputClick;
+        cleanups.push(() => {
+          if (inputPrototype.click === wrappedInputClick)
+            inputPrototype.click = originalInputClick;
+        });
+      } catch {
+        // Some browser hosts expose non-writable element prototypes.
       }
     }
 
