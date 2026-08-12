@@ -3424,6 +3424,54 @@ describe("ambient watchdog signals", () => {
     form.remove();
   });
 
+  test("preserves a dirty form across a persisted BFCache pagehide", async () => {
+    const form = document.createElement("form");
+    form.setAttribute(BEACON_ATTRIBUTE.FORM, "invite-member");
+    const input = document.createElement("input");
+    form.append(input);
+    document.body.append(form);
+    const { beacon, sent } = makeWatchdogBeacon();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const cachedPageHide = new Event("pagehide");
+    Object.defineProperty(cachedPageHide, "persisted", { value: true });
+    window.dispatchEvent(cachedPageHide);
+    await beacon.flush();
+    expect(signalsSent(sent, "form_abandonment")).toHaveLength(0);
+
+    const cachedPageShow = new Event("pageshow");
+    Object.defineProperty(cachedPageShow, "persisted", { value: true });
+    window.dispatchEvent(cachedPageShow);
+    form.dispatchEvent(new Event("submit", { bubbles: true }));
+    window.dispatchEvent(
+      new PageTransitionEvent("pagehide", { persisted: false }),
+    );
+    await beacon.flush();
+    expect(signalsSent(sent, "form_abandonment")).toHaveLength(0);
+    form.remove();
+  });
+
+  test("reports a BFCache-restored dirty form on a later terminal pagehide", async () => {
+    const form = document.createElement("form");
+    form.setAttribute(BEACON_ATTRIBUTE.FORM, "invite-member");
+    const input = document.createElement("input");
+    form.append(input);
+    document.body.append(form);
+    const { beacon, sent } = makeWatchdogBeacon();
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const cachedPageHide = new Event("pagehide");
+    Object.defineProperty(cachedPageHide, "persisted", { value: true });
+    window.dispatchEvent(cachedPageHide);
+    const cachedPageShow = new Event("pageshow");
+    Object.defineProperty(cachedPageShow, "persisted", { value: true });
+    window.dispatchEvent(cachedPageShow);
+    window.dispatchEvent(
+      new PageTransitionEvent("pagehide", { persisted: false }),
+    );
+    await beacon.flush();
+    expect(signalsSent(sent, "form_abandonment")).toHaveLength(1);
+    form.remove();
+  });
+
   test("reports marked media playback failures without inspecting media", async () => {
     const media = document.createElement("video");
     media.setAttribute(BEACON_ATTRIBUTE.MEDIA, "deal-preview");

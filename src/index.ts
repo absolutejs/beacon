@@ -5142,7 +5142,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       reportFormAbandonmentOnNavigation = report;
       document.addEventListener("input", onInput, true);
       document.addEventListener("submit", onSubmit, true);
-      const reportOnPageHide = (): void => report();
+      const reportOnPageHide = (event: PageTransitionEvent): void => {
+        // A persisted pagehide moves this live document into the back-forward
+        // cache. Its form and dirty state survive and may be submitted after
+        // pageshow, so this is not an abandonment. Keep the dirty set intact
+        // for a later submit, SPA navigation, or terminal pagehide.
+        if (event.persisted) return;
+        report();
+      };
       window.addEventListener("pagehide", reportOnPageHide);
       cleanups.push(() => {
         reportFormAbandonmentOnNavigation = null;
