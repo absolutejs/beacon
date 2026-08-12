@@ -3443,6 +3443,55 @@ describe("ambient watchdog signals", () => {
     window.WebSocket = original;
   });
 
+  test("attributes queued BFCache socket closes to the prior page lifecycle", async () => {
+    class FakeWebSocket extends EventTarget {
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {}
+      serverClose(): void {
+        this.dispatchEvent(
+          new CloseEvent("close", { code: 1006, wasClean: false }),
+        );
+      }
+    }
+    const original = window.WebSocket;
+    const originalNow = Date.now;
+    let now = 1000;
+    Date.now = () => now;
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { layoutOverflowSettleMs: 0, socketFlapping: false },
+      });
+      const queuedLifecycleSocket = new window.WebSocket(
+        "wss://app.test/sync/ws",
+      );
+      const genuinelyLaterSocket = new window.WebSocket(
+        "wss://app.test/sync/ws",
+      );
+      window.dispatchEvent(new Event("pagehide"));
+      const restored = new Event("pageshow");
+      Object.defineProperty(restored, "persisted", { value: true });
+      window.dispatchEvent(restored);
+
+      (queuedLifecycleSocket as unknown as FakeWebSocket).serverClose();
+      await beacon.flush();
+      expect(signalsSent(sent, "socket_abnormal_close")).toHaveLength(0);
+
+      now += 1001;
+      (genuinelyLaterSocket as unknown as FakeWebSocket).serverClose();
+      await beacon.flush();
+      expect(signalsSent(sent, "socket_abnormal_close")).toHaveLength(1);
+      await beacon.close();
+    } finally {
+      Date.now = originalNow;
+      window.WebSocket = original;
+    }
+  });
+
   test("reports dedicated worker runtime failures", async () => {
     class FakeWorker extends EventTarget {
       constructor(_url: string | URL) {

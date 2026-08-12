@@ -1519,6 +1519,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const STALE_RELEASE_STORAGE_KEY = "beacon:release-first-seen";
   const STALE_RELEASE_GRACE_MS = 600000;
   const STALE_RELEASE_HISTORY_LIMIT = 5;
+  // BFCache can deliver an old socket's queued close after `pageshow`, when the
+  // page is active again. Keep that prior lifecycle attributable briefly
+  // without hiding genuinely later transport failures on the restored page.
+  const RESTORED_SOCKET_CLOSE_GRACE_MS = 1000;
   const FORM_FRUSTRATION_THRESHOLD = 3;
   const FORM_FRUSTRATION_WINDOW_MS = 60000;
   const LAYOUT_SHIFT_RECENT_INTERACTION_MS = 500;
@@ -1551,6 +1555,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let clipboardWriteCount = 0;
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
+  let pageLifecycleGeneration = 0;
+  let pageRestoredAt: number | undefined;
   let recentInteraction:
     | {
         at: number;
@@ -5237,6 +5243,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       construct(target, args: unknown[]): object {
         const socket = Reflect.construct(target, args) as unknown as WebSocket;
         const label = shortUrl(String(args[0]));
+        const socketLifecycleGeneration = pageLifecycleGeneration;
         let applicationClose = false;
         const originalClose = socket.close.bind(socket);
         socket.close = (code?: number, reason?: string): void => {
@@ -5244,7 +5251,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           originalClose(code, reason);
         };
         socket.addEventListener("close", (event) => {
-          if (pageLifecycleEnding || applicationClose) return;
+          const restoredLifecycleClose =
+            pageRestoredAt !== undefined &&
+            socketLifecycleGeneration < pageLifecycleGeneration &&
+            Date.now() - pageRestoredAt <= RESTORED_SOCKET_CLOSE_GRACE_MS;
+          if (pageLifecycleEnding || applicationClose || restoredLifecycleClose)
+            return;
           if (
             signals.socketAbnormalCloses !== false &&
             typeof CloseEvent !== "undefined" &&
@@ -5966,6 +5978,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
   const onPageHide = (): void => {
     pageLifecycleEnding = true;
+    pageLifecycleGeneration += 1;
+    pageRestoredAt = undefined;
     // Browsers do not consistently surface navigation-cancelled fetches as
     // AbortError. Chromium can reject them with TypeError("Failed to fetch"),
     // so discard only pending generic transport failures during page teardown.
@@ -5973,8 +5987,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     pendingNetworkFailures.delete("transport");
     void flush(true);
   };
-  const onPageShow = (): void => {
+  const onPageShow = (event: PageTransitionEvent): void => {
     pageLifecycleEnding = false;
+    pageRestoredAt = event.persisted ? Date.now() : undefined;
   };
   const onVisibilityChange = (): void => {
     if (document.visibilityState === "hidden") void flush(true);
