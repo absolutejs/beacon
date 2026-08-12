@@ -4046,6 +4046,41 @@ describe("ambient watchdog signals", () => {
     stream.remove();
   });
 
+  test("does not treat a determinate progressbar as a loading indicator", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 1 },
+    });
+    const progress = document.createElement("div");
+    progress.setAttribute("aria-valuemax", "4");
+    progress.setAttribute("aria-valuemin", "0");
+    progress.setAttribute("aria-valuenow", "2");
+    progress.setAttribute("role", "progressbar");
+    setRect(progress, rectOf(0, 300, 0, 20));
+    document.body.append(progress);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await settle(beacon);
+    expect(signalsSent(sent, "stuck_loading")).toHaveLength(0);
+    progress.remove();
+  });
+
+  test("still watches determinate progressbars explicitly marked busy", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 1 },
+    });
+    const progress = document.createElement("div");
+    progress.setAttribute("aria-busy", "true");
+    progress.setAttribute("aria-valuenow", "2");
+    progress.setAttribute("role", "progressbar");
+    setRect(progress, rectOf(0, 300, 0, 20));
+    document.body.append(progress);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await settle(beacon);
+    expect(signalsSent(sent, "stuck_loading")).toHaveLength(1);
+    progress.remove();
+  });
+
   test("reports a marked iframe that never loads", async () => {
     const frame = document.createElement("iframe");
     const originalDispatch = frame.dispatchEvent.bind(frame);

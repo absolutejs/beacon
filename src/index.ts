@@ -3724,6 +3724,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     //   poll catches spinners that hang while the user does nothing at all.
     const loadingFirstSeen = new WeakMap<Element, number>();
     const reportedStuckLoading = new WeakSet<Element>();
+    const isPersistentDeterminateProgress = (indicator: Element): boolean =>
+      indicator.getAttribute("role") === "progressbar" &&
+      indicator.hasAttribute("aria-valuenow") &&
+      indicator.getAttribute("aria-busy") !== "true" &&
+      !indicator.hasAttribute(BEACON_ATTRIBUTE.LOADING);
     const loadingDeadlineMs = (indicator: Element): number => {
       const configured = indicator
         .getAttribute(BEACON_ATTRIBUTE.LOADING_TIMEOUT)
@@ -3742,6 +3747,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       );
       const now = Date.now();
       for (const indicator of Array.from(indicators)) {
+        if (isPersistentDeterminateProgress(indicator)) continue;
         if (isScanExempt(indicator)) continue;
         const rect = indicator.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) continue;
