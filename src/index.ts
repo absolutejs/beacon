@@ -5723,7 +5723,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         PerformanceNavigationTiming | undefined;
       if (navigation?.type !== "back_forward") {
         const now = Date.now();
-        const route = normalizeSignalIdentityPart(shortUrl(location.href));
+        // Storage stays in this browser tab and is never transported. Keep the
+        // exact pathname here so rapidly opening several entity-detail pages
+        // does not look like repeated loads after privacy fingerprinting turns
+        // every UUID into `:id`. The emitted message/grouping below remains
+        // normalized and privacy-safe.
+        const route = shortUrl(location.href);
         const raw = sessionStorage.getItem(RELOAD_LOOP_STORAGE_KEY);
         const parsed: unknown = raw === null ? [] : JSON.parse(raw);
         const history = (Array.isArray(parsed) ? parsed : []).filter(

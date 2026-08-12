@@ -4021,6 +4021,38 @@ describe("ambient watchdog signals", () => {
     sessionStorage.removeItem("beacon:reload-history-v2");
   });
 
+  test("does not collapse different entity ids into one reload-loop route", async () => {
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-history-v2",
+      JSON.stringify([
+        {
+          at: now - 3000,
+          route: "/admin/support/11111111-1111-4111-8111-111111111111",
+        },
+        {
+          at: now - 2000,
+          route: "/admin/support/22222222-2222-4222-8222-222222222222",
+        },
+        {
+          at: now - 1000,
+          route: "/admin/support/33333333-3333-4333-8333-333333333333",
+        },
+      ]),
+    );
+    const { beacon, sent } = makeWatchdogBeacon();
+    await beacon.flush();
+    expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
+    const stored: unknown = JSON.parse(
+      sessionStorage.getItem("beacon:reload-history-v2") ?? "[]",
+    );
+    expect(stored).toContainEqual({
+      at: expect.any(Number),
+      route: "/admin/support/11111111-1111-4111-8111-111111111111",
+    });
+    sessionStorage.removeItem("beacon:reload-history-v2");
+  });
+
   test("reports running a build older than one already seen", async () => {
     const now = Date.now();
     localStorage.setItem(
