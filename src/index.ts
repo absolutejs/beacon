@@ -1054,6 +1054,36 @@ const resourceSourceOf = (url: string | undefined): string => {
   }
 };
 
+const isExtensionResourceUrl = (url: string | undefined): boolean => {
+  if (url === undefined) return false;
+  try {
+    const protocol = new URL(url, location.href).protocol;
+    return protocol === "chrome-extension:" || protocol === "moz-extension:";
+  } catch {
+    return false;
+  }
+};
+
+const injectionMarkersOf = (element: Element): string | undefined => {
+  const markers = new Set<string>();
+  for (
+    let current: Element | null = element;
+    current;
+    current = current.parentElement
+  ) {
+    for (const attribute of Array.from(current.attributes)) {
+      if (
+        /^(?:data-darkreader|data-adguard|data-extension|data-gramm|data-lastpass|bis_)/u.test(
+          attribute.name,
+        )
+      ) {
+        markers.add(attribute.name);
+      }
+    }
+  }
+  return markers.size === 0 ? undefined : Array.from(markers).sort().join(",");
+};
+
 const describeElement = (element: Element): string => {
   const tag = element.tagName.toLowerCase();
   const beaconName = element
@@ -3246,6 +3276,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (seenOverflows.has(key)) return;
       seenOverflows.add(key);
       overflowReports += 1;
+      const rect = element.getBoundingClientRect();
+      const resourceUrl = RESOURCE_ERROR_TAGS.has(element.tagName.toLowerCase())
+        ? resourceUrlOf(element)
+        : undefined;
+      const injectionMarkers = injectionMarkersOf(element);
       emitSignal(
         `Layout overflow — ${describeElement(element)} ${detail} — ${shortUrl(location.href)} [${bucket}]`,
         {
@@ -3253,6 +3288,21 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           signal: BEACON_SIGNAL.LAYOUT_OVERFLOW,
           spillPx: String(Math.round(spillPx)),
           target: describeElement(element),
+          targetAncestor:
+            element.parentElement === null
+              ? "none"
+              : describeElement(element.parentElement),
+          targetBottomPx: String(Math.round(rect.bottom)),
+          targetHeightPx: String(Math.round(rect.height)),
+          targetLeftPx: String(Math.round(rect.left)),
+          targetPosition: window.getComputedStyle(element).position,
+          targetRightPx: String(Math.round(rect.right)),
+          targetTopPx: String(Math.round(rect.top)),
+          targetWidthPx: String(Math.round(rect.width)),
+          ...(resourceUrl === undefined
+            ? {}
+            : { resourceSource: resourceSourceOf(resourceUrl) }),
+          ...(injectionMarkers === undefined ? {} : { injectionMarkers }),
           viewportBucket: bucket,
           viewportWidth: String(document.documentElement.clientWidth),
         },
@@ -3267,6 +3317,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const visit = (element: Element, parentRect: DOMRect | null): void => {
         if (overflowReports >= overflowMaxReports) return;
         if (element.getAttribute(BEACON_ATTRIBUTE.OVERFLOW) === "allow") return;
+        if (
+          RESOURCE_ERROR_TAGS.has(element.tagName.toLowerCase()) &&
+          isExtensionResourceUrl(resourceUrlOf(element))
+        ) {
+          return;
+        }
         const style = window.getComputedStyle(element);
         if (hasHiddenAncestor(element)) return;
         const rect = element.getBoundingClientRect();

@@ -2218,6 +2218,46 @@ describe("layout-overflow signals", () => {
     wide.remove();
   });
 
+  test("reports an unclassed app image with privacy-safe overflow provenance", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const parent = document.createElement("figure");
+    const image = document.createElement("img");
+    image.setAttribute(
+      "src",
+      "https://assets.example.test/guide-cover.webp?member=private",
+    );
+    image.setAttribute("data-darkreader-inline-color", "");
+    mockRect(parent, domRect(0, VIEWPORT_WIDTH));
+    mockRect(image, domRect(0, 1040));
+    parent.append(image);
+    document.body.append(parent);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(1);
+    const tags = sent[0]?.events[0]?.tags;
+    expect(tags?.target).toBe("img");
+    expect(tags?.targetAncestor).toBe("figure");
+    expect(tags?.resourceSource).toBe("assets.example.test");
+    expect(tags?.targetLeftPx).toBe("0");
+    expect(tags?.targetRightPx).toBe("1040");
+    expect(tags?.targetWidthPx).toBe("1040");
+    expect(tags?.injectionMarkers).toBe("data-darkreader-inline-color");
+    expect(JSON.stringify(tags)).not.toContain("member=private");
+    parent.remove();
+  });
+
+  test("does not report positively identified extension resource overflow", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const image = document.createElement("img");
+    image.setAttribute("src", "chrome-extension://abc123/injected.png");
+    mockRect(image, domRect(0, 1040));
+    document.body.append(image);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    image.remove();
+  });
+
   test("honors the data-beacon-overflow allow escape hatch", async () => {
     const { beacon, sent } = makeOverflowBeacon();
     const bleed = document.createElement("div");
