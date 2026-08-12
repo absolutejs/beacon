@@ -713,6 +713,50 @@ describe("auto-instrumentation", () => {
     window.open = originalOpen;
   });
 
+  test("recognizes opening the native share sheet as a click response", async () => {
+    const originalShare = Object.getOwnPropertyDescriptor(navigator, "share");
+    let resolveShare: (() => void) | undefined;
+    Object.defineProperty(navigator, "share", {
+      configurable: true,
+      value: () =>
+        new Promise<void>((resolve) => {
+          resolveShare = resolve;
+        }),
+      writable: true,
+    });
+    const sent: BeaconEnvelope[] = [];
+    const button = document.createElement("button");
+    document.body.append(button);
+    try {
+      const beacon = track(
+        createBeacon({
+          instrument: { ...ALL_OFF, clicks: true },
+          project: "web",
+          signals: { deadClicks: true, rageClicks: false },
+          transport: ({ body }) => {
+            sent.push(JSON.parse(body) as BeaconEnvelope);
+          },
+        }),
+      );
+      button.addEventListener("click", () => {
+        void navigator.share({ title: "Room" });
+      });
+      button.click();
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      await beacon.flush();
+      expect(resolveShare).toBeFunction();
+      expect(sent).toHaveLength(0);
+      resolveShare?.();
+    } finally {
+      button.remove();
+      if (originalShare === undefined) {
+        Reflect.deleteProperty(navigator, "share");
+      } else {
+        Object.defineProperty(navigator, "share", originalShare);
+      }
+    }
+  });
+
   test("does not report modifier-assisted anchor navigation as a dead click", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(

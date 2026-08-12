@@ -1569,6 +1569,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // starts a request or opens another browsing context.
   let networkRequestCount = 0;
   let externalNavigationCount = 0;
+  let externalShareCount = 0;
   let clipboardWriteCount = 0;
   let inSignalConsole = false;
   let pageLifecycleEnding = false;
@@ -2266,6 +2267,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const formBefore = snapshotRelevantFormControls(control);
     const networkRequestsBefore = networkRequestCount;
     const externalNavigationsBefore = externalNavigationCount;
+    const externalSharesBefore = externalShareCount;
     const clipboardWritesBefore = clipboardWriteCount;
     let routerAcceptedNavigation = false;
     let mutated = false;
@@ -2285,6 +2287,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       document.activeElement !== activeBefore ||
       networkRequestCount !== networkRequestsBefore ||
       externalNavigationCount !== externalNavigationsBefore ||
+      externalShareCount !== externalSharesBefore ||
       clipboardWriteCount !== clipboardWritesBefore;
     const finish = (didRespond: boolean, navigationStalled = false): void => {
       if (finished) return;
@@ -2970,6 +2973,30 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       cleanups.push(() => {
         if (window.open === wrappedWindowOpen) window.open = originalWindowOpen;
       });
+
+      if (
+        typeof navigator !== "undefined" &&
+        typeof navigator.share === "function"
+      ) {
+        const originalShare = navigator.share;
+        const wrappedShare: Navigator["share"] = (...args) => {
+          // Opening the browser-owned share sheet is the response. Its promise
+          // may remain pending while the user reads, shares, or dismisses it,
+          // so count invocation synchronously rather than awaiting settlement.
+          externalShareCount += 1;
+
+          return originalShare.apply(navigator, args);
+        };
+        try {
+          navigator.share = wrappedShare;
+          cleanups.push(() => {
+            if (navigator.share === wrappedShare)
+              navigator.share = originalShare;
+          });
+        } catch {
+          // Some browser hosts expose a non-writable share function.
+        }
+      }
     }
 
     let unresponsiveClicks: Array<{
