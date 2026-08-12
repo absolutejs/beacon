@@ -1261,6 +1261,56 @@ describe("auto-instrumentation", () => {
     ).toBe(false);
   });
 
+  test("identifies Google Web Renderer service-worker registration rejection", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Rejected",
+        name: "Error",
+        stack:
+          "Error: Rejected\n" +
+          "    at wrsParams.serviceWorkers.navigator.serviceWorker.register (<anonymous>:460:195)",
+      }),
+    ).toBe(true);
+  });
+
+  test("identifies masked scanner service-worker wrapper rejection", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Rejected",
+        name: "Error",
+        stack:
+          "Error: Rejected\n" +
+          "    at ServiceWorkerContainer.<anonymous> (<anonymous>:669:449)\n" +
+          "    at ServiceWorkerContainer.register (<anonymous>:460:195)",
+      }),
+    ).toBe(true);
+  });
+
+  test.each([
+    {
+      message: "Rejected",
+      name: "Error",
+      stack:
+        "Error: Rejected\n    at register (https://example.com/app.js:20:4)",
+    },
+    {
+      message: "The operation is insecure.",
+      name: "SecurityError",
+      stack:
+        "SecurityError: The operation is insecure.\n" +
+        "    at ServiceWorkerContainer.register (https://example.com/app.js:20:4)",
+    },
+    {
+      message: "The operation was aborted.",
+      name: "AbortError",
+      stack:
+        "AbortError: The operation was aborted.\n" +
+        "    at ServiceWorkerContainer.register (https://example.com/app.js:20:4)",
+    },
+  ])("preserves application and native service-worker failures", (event) => {
+    expect(isKnownBeaconNoise(event)).toBe(false);
+  });
+
   test.each([
     "Mozilla/5.0 (compatible; AdsBot-Google/2.1; +http://www.google.com/adsbot.html)",
     "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
@@ -3298,15 +3348,35 @@ describe("ambient watchdog signals", () => {
     const { beacon, sent } = makeWatchdogBeacon({
       instrument: { ...ALL_OFF, history: true },
     });
+    const departedPath = `${location.pathname}${location.search}`;
+    const destination =
+      departedPath === "/after-form" ? "/after-form-next" : "/after-form";
     input.dispatchEvent(new Event("input", { bubbles: true }));
-    history.pushState(null, "", "/after-form");
+    history.pushState(null, "", destination);
     await beacon.flush();
     const events = signalsSent(sent, "form_abandonment");
     expect(events).toHaveLength(1);
     expect(events[0]?.tags).toMatchObject({
       fieldCount: "1",
       target: "deal-editor",
+      url: departedPath === "blank" ? "/blank" : departedPath,
     });
+    form.remove();
+  });
+
+  test("does not abandon a dirty form for same-URL history replacement", async () => {
+    const form = document.createElement("form");
+    form.setAttribute(BEACON_ATTRIBUTE.FORM, "invite-member");
+    const input = document.createElement("input");
+    form.append(input);
+    document.body.append(form);
+    const { beacon, sent } = makeWatchdogBeacon({
+      instrument: { ...ALL_OFF, history: true },
+    });
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    history.replaceState(null, "", location.href);
+    await beacon.flush();
+    expect(signalsSent(sent, "form_abandonment")).toHaveLength(0);
     form.remove();
   });
 

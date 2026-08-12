@@ -933,6 +933,19 @@ const FACEBOOK_ANDROID_PERFORMANCE_LOGGER =
   "iabjs://navigation_performance_logger_android";
 const KNOWN_CRAWLER_USER_AGENT =
   /(?:AdsBot-Google|Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|Applebot|Bytespider|PetalBot|SemrushBot|AhrefsBot|DotBot|MJ12bot|GPTBot|ClaudeBot|PerplexityBot|Google-NotebookLM|BitSightBot|Dataprovider\.com|meta-external(?:agent|ads))/i;
+const GOOGLE_WEB_RENDERER_SERVICE_WORKER_WRAPPER =
+  "wrsParams.serviceWorkers.navigator.serviceWorker.register";
+const isInjectedServiceWorkerRejection = (
+  event: Pick<BeaconEvent, "message" | "stack">,
+): boolean => {
+  const stack = event.stack ?? "";
+  if (stack.includes(GOOGLE_WEB_RENDERER_SERVICE_WORKER_WRAPPER)) return true;
+  return (
+    event.message === "Rejected" &&
+    stack.includes("ServiceWorkerContainer.<anonymous> (<anonymous>:") &&
+    stack.includes("ServiceWorkerContainer.register (<anonymous>:")
+  );
+};
 
 const browserUserAgent = (): string =>
   typeof navigator === "undefined" ? "" : navigator.userAgent;
@@ -948,6 +961,7 @@ export const isKnownBeaconNoise = (
   (FACEBOOK_IOS_IN_APP_BROWSER.test(userAgent) &&
     FACEBOOK_IOS_HOST_INJECTION.has(event.message)) ||
   isInstagramIosBridgeInjection(event, userAgent) ||
+  isInjectedServiceWorkerRejection(event) ||
   (event.name === "Error" &&
     event.message === FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE &&
     event.tags?.errorFilename === FACEBOOK_ANDROID_PERFORMANCE_LOGGER &&
@@ -1569,7 +1583,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       }
     | undefined;
   let reportErrorClick: ((errorName: string) => void) | null = null;
-  let reportFormAbandonmentOnNavigation: (() => void) | null = null;
+  let reportFormAbandonmentOnNavigation:
+    ((departedUrl?: string) => void) | null = null;
   const focusedEditable = (): HTMLElement | null => {
     const active = document.activeElement;
     if (active instanceof HTMLTextAreaElement) return active;
@@ -5079,18 +5094,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         submittedForms.add(event.target);
         dirtyForms.delete(event.target);
       };
-      const report = (): void => {
+      const report = (departedUrl = location.href): void => {
         for (const form of dirtyForms) {
           if (!form.isConnected || submittedForms.has(form)) continue;
           const name =
             form.getAttribute(BEACON_ATTRIBUTE.FORM)?.trim() ||
             describeElement(form);
           emitSignal(
-            `Form abandonment — ${name} left dirty — ${shortUrl(location.href)}`,
+            `Form abandonment — ${name} left dirty — ${shortUrl(departedUrl)}`,
             {
               fieldCount: String(form.elements.length),
               signal: BEACON_SIGNAL.FORM_ABANDONMENT,
               target: name,
+              url: shortUrl(departedUrl),
             },
           );
           dirtyForms.delete(form);
@@ -5099,12 +5115,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       reportFormAbandonmentOnNavigation = report;
       document.addEventListener("input", onInput, true);
       document.addEventListener("submit", onSubmit, true);
-      window.addEventListener("pagehide", report);
+      const reportOnPageHide = (): void => report();
+      window.addEventListener("pagehide", reportOnPageHide);
       cleanups.push(() => {
         reportFormAbandonmentOnNavigation = null;
         document.removeEventListener("input", onInput, true);
         document.removeEventListener("submit", onSubmit, true);
-        window.removeEventListener("pagehide", report);
+        window.removeEventListener("pagehide", reportOnPageHide);
       });
     }
   }
@@ -5962,19 +5979,40 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   }
 
   if (instrument.history !== false && typeof history !== "undefined") {
+    let recordedHistoryUrl = location.href;
     const record = (): void => {
       addBreadcrumb({
         message: `navigate ${location.pathname}${location.search}`,
         type: "navigation",
       });
+      recordedHistoryUrl = location.href;
       // The new route's layout deserves the same overflow check as a resize.
       overflowScanOnNavigation?.();
     };
     const patch = (key: "pushState" | "replaceState"): (() => void) => {
       const original = history[key].bind(history);
       history[key] = (...args: Parameters<History["pushState"]>) => {
-        reportFormAbandonmentOnNavigation?.();
+        const departedUrl = location.href;
+        const destination = args[2];
+        let changesUrl = false;
+        if (destination !== undefined && destination !== null) {
+          try {
+            changesUrl =
+              new URL(String(destination), departedUrl).href !== departedUrl;
+          } catch {
+            // Non-browser DOM hosts can expose a non-hierarchical base such as
+            // about:blank while still implementing path-based history. The
+            // native method below remains authoritative for invalid URLs.
+            const rawDestination = String(destination);
+            changesUrl =
+              rawDestination !== departedUrl &&
+              rawDestination !==
+                `${location.pathname}${location.search}${location.hash}`;
+          }
+        }
         const result = original(...args);
+        if (!changesUrl) return result;
+        reportFormAbandonmentOnNavigation?.(departedUrl);
         record();
         return result;
       };
@@ -5984,7 +6022,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
     cleanups.push(patch("pushState"), patch("replaceState"));
     const onPopState = (): void => {
-      reportFormAbandonmentOnNavigation?.();
+      if (location.href === recordedHistoryUrl) return;
+      reportFormAbandonmentOnNavigation?.(recordedHistoryUrl);
       record();
     };
     window.addEventListener("popstate", onPopState);
