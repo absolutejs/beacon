@@ -930,7 +930,7 @@ const FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE =
 const FACEBOOK_ANDROID_PERFORMANCE_LOGGER =
   "iabjs://navigation_performance_logger_android";
 const KNOWN_CRAWLER_USER_AGENT =
-  /(?:AdsBot-Google|Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|Applebot|Bytespider|PetalBot|SemrushBot|AhrefsBot|DotBot|MJ12bot|GPTBot|ClaudeBot|PerplexityBot|Google-NotebookLM|BitSightBot|Dataprovider\.com|meta-externalagent)/i;
+  /(?:AdsBot-Google|Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|Applebot|Bytespider|PetalBot|SemrushBot|AhrefsBot|DotBot|MJ12bot|GPTBot|ClaudeBot|PerplexityBot|Google-NotebookLM|BitSightBot|Dataprovider\.com|meta-external(?:agent|ads))/i;
 
 const browserUserAgent = (): string =>
   typeof navigator === "undefined" ? "" : navigator.userAgent;

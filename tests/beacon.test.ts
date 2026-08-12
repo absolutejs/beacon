@@ -1268,6 +1268,7 @@ describe("auto-instrumentation", () => {
     "Mozilla/5.0 Dataprovider.com",
     "Mozilla/5.0 Google-NotebookLM",
     "Mozilla/5.0 (compatible; meta-externalagent/1.1; +https://developers.facebook.com/docs/sharing/webmasters/crawler)",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1 (compatible; meta-externalads/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))",
   ])("drops crawler and scanner traffic: %s", (userAgent) => {
     expect(
       isKnownBeaconNoise(
