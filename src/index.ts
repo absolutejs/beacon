@@ -4746,21 +4746,36 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     // (already at the top/bottom) and app-handled wheels (preventDefault:
     // carousels, canvas zoom) reset the burst instead of counting.
     if (signals.scrollJail !== false) {
+      const MODAL_SCROLL_OWNER_SELECTOR = '[aria-modal="true"], dialog[open]';
+      const isScrollable = (node: Element): boolean => {
+        const overflowY = window.getComputedStyle(node).overflowY;
+
+        return (
+          (overflowY === "auto" || overflowY === "scroll") &&
+          node.scrollHeight > node.clientHeight + 1
+        );
+      };
       const nearestScrollable = (start: Element | null): Element | null => {
         let node = start;
         while (node !== null && node !== document.body) {
-          const style = window.getComputedStyle(node);
-          const overflowY = style.overflowY;
-          if (
-            (overflowY === "auto" || overflowY === "scroll") &&
-            node.scrollHeight > node.clientHeight + 1
-          ) {
-            return node;
-          }
+          if (isScrollable(node)) return node;
           node = node.parentElement;
         }
 
         return null;
+      };
+      const modalOwnedScroller = (modal: Element): Element | null => {
+        const candidates = Array.from(modal.querySelectorAll("*")).filter(
+          isScrollable,
+        );
+        const outermost = candidates.filter(
+          (candidate) =>
+            !candidates.some(
+              (other) => other !== candidate && other.contains(candidate),
+            ),
+        );
+
+        return outermost.length === 1 ? (outermost[0] ?? null) : null;
       };
       let jailBurst: Array<{ at: number; position: number }> = [];
       let jailScroller: Element | null = null;
@@ -4787,7 +4802,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           return;
         }
         const target = event.target instanceof Element ? event.target : null;
-        const scroller = nearestScrollable(target) ?? document.scrollingElement;
+        const modal = target?.closest(MODAL_SCROLL_OWNER_SELECTOR) ?? null;
+        const scroller =
+          nearestScrollable(target) ??
+          (modal === null ? null : modalOwnedScroller(modal)) ??
+          document.scrollingElement;
         if (!(scroller instanceof Element)) {
           jailBurst = [];
 
@@ -4838,8 +4857,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               scroller.scrollHeight - SCROLL_JAIL_BOUNDARY_TOLERANCE_PX
             : scroller.scrollTop > SCROLL_JAIL_BOUNDARY_TOLERANCE_PX;
           if (!canStillMove) return;
-          // An open overlay may lock page scroll on purpose.
-          if (viewportCoveredByOverlay()) return;
+          // An open overlay may lock the page on purpose, but scrolling owned
+          // by that overlay must remain usable. A dialog header and its body
+          // scroller are commonly siblings, so the wheel target alone is not
+          // enough to identify the intended scroll surface.
+          if (
+            viewportCoveredByOverlay() &&
+            (modal === null || !modal.contains(scroller))
+          )
+            return;
           const descriptor = describeElement(scroller);
           if (reportedScrollers.has(descriptor)) return;
           reportedScrollers.add(descriptor);

@@ -2595,6 +2595,71 @@ describe("ambient watchdog signals", () => {
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
   });
 
+  test("reports an immobile modal body when wheel input targets its header", async () => {
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    const header = document.createElement("header");
+    const body = document.createElement("div");
+    body.style.overflowY = "auto";
+    Object.defineProperty(body, "scrollHeight", {
+      configurable: true,
+      value: 2000,
+    });
+    Object.defineProperty(body, "clientHeight", {
+      configurable: true,
+      value: 500,
+    });
+    Object.defineProperty(body, "scrollTop", {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    modal.append(header, body);
+    document.body.append(modal);
+    const { beacon, sent } = makeWatchdogBeacon();
+    for (let index = 0; index < 8; index += 1) {
+      const wheel = new Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "deltaY", { value: 100 });
+      Object.defineProperty(wheel, "ctrlKey", { value: false });
+      header.dispatchEvent(wheel);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
+    modal.remove();
+  });
+
+  test("continues to ignore intentional page scroll lock beneath a modal", async () => {
+    const modal = document.createElement("section");
+    modal.setAttribute("aria-modal", "true");
+    document.body.append(modal);
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    Object.defineProperty(scrolling, "scrollHeight", {
+      configurable: true,
+      value: 3000,
+    });
+    Object.defineProperty(scrolling, "clientHeight", {
+      configurable: true,
+      value: VIEWPORT_H,
+    });
+    Object.defineProperty(scrolling, "scrollTop", {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    for (let index = 0; index < 8; index += 1) {
+      const wheel = new Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "deltaY", { value: 100 });
+      Object.defineProperty(wheel, "ctrlKey", { value: false });
+      document.body.dispatchEvent(wheel);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
+    modal.remove();
+  });
+
   test("does not report compositor-delayed wheel movement as a scroll jail", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const scrolling = document.scrollingElement ?? document.documentElement;
