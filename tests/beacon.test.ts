@@ -3945,6 +3945,38 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("tolerates a service-worker register shim with no registration", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    const container = new EventTarget() as EventTarget & {
+      register: ServiceWorkerContainer["register"];
+    };
+    container.register = async () => undefined as never;
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: container,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await navigator.serviceWorker.register("/sw.js");
+      await beacon.flush();
+      expect(signalsSent(sent, "service_worker_failure")).toHaveLength(0);
+      await beacon.close();
+    } finally {
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
+  });
+
   test("reports a service worker that becomes redundant before activation", async () => {
     const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
       navigator,
@@ -4188,6 +4220,31 @@ describe("ambient watchdog signals", () => {
     expect(events[0]?.tags?.coveredBy).toBe("div.leaked-scrim");
     button.remove();
     scrim.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
+  test("does not report a control covered by browser-extension UI", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const button = document.createElement("button");
+    button.className = "consent-action";
+    setRect(button, rectOf(100, 240, 100, 144));
+    const extensionFrame = document.createElement("iframe");
+    extensionFrame.id = "extension-toolbar";
+    const originalGetAttribute =
+      extensionFrame.getAttribute.bind(extensionFrame);
+    extensionFrame.getAttribute = (name: string) =>
+      name === "src"
+        ? "chrome-extension://abc123/panel.html"
+        : originalGetAttribute(name);
+    setRect(extensionFrame, rectOf(80, 260, 80, 180));
+    document.body.append(button, extensionFrame);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => extensionFrame;
+    await settle(beacon);
+    expect(signalsSent(sent, "occluded_control")).toHaveLength(0);
+    button.remove();
+    extensionFrame.remove();
     await beacon.close();
     document.elementFromPoint = originalFromPoint;
   });

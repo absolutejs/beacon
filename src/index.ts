@@ -3486,6 +3486,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       return visible;
     };
 
+    const isExtensionOwnedCover = (element: Element): boolean => {
+      if (element.tagName !== "IFRAME") return false;
+      const source = element.getAttribute("src")?.trim().toLowerCase() ?? "";
+      return (
+        source.startsWith("chrome-extension:") ||
+        source.startsWith("moz-extension:") ||
+        source.startsWith("safari-web-extension:")
+      );
+    };
+
     const scanForOcclusion = (): void => {
       if (typeof document.elementFromPoint !== "function") return;
       // While an overlay owns the page, covering the rest of it is the point.
@@ -3517,7 +3527,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           top === null ||
           top === control ||
           control.contains(top) ||
-          top.contains(control)
+          top.contains(control) ||
+          // Browser extensions may inject their own UI above the document.
+          // The application cannot repair or safely attribute that occlusion.
+          isExtensionOwnedCover(top)
         ) {
           continue;
         }
@@ -5688,6 +5701,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           registration.removeEventListener("updatefound", onUpdateFound),
         );
       };
+      const isServiceWorkerRegistration = (
+        registration: unknown,
+      ): registration is ServiceWorkerRegistration =>
+        typeof registration === "object" &&
+        registration !== null &&
+        "installing" in registration &&
+        typeof (registration as { addEventListener?: unknown })
+          .addEventListener === "function";
       const originalRegister = container.register;
       const wrappedRegister: typeof container.register = async function (
         this: ServiceWorkerContainer,
@@ -5701,7 +5722,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             scriptURL,
             registrationOptions,
           );
-          watchRegistration(registration);
+          // Restricted browser shims may resolve without the platform's
+          // registration object. Do not turn Beacon's observer into the
+          // service-worker failure in that non-standard environment.
+          if (isServiceWorkerRegistration(registration)) {
+            watchRegistration(registration);
+          }
 
           return registration;
         } catch (error) {
