@@ -3403,7 +3403,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         const overflowX = style.overflowX;
         if (overflowX === "auto" || overflowX === "scroll") return;
         if (overflowX === "hidden" || overflowX === "clip") {
-          const clipPx = element.scrollWidth - element.clientWidth;
+          // A classic vertical scrollbar reduces clientWidth while the
+          // element's border-box and scrollWidth remain equal. That gutter is
+          // not horizontally clipped application content.
+          const horizontalContentWidth = Math.max(
+            element.clientWidth,
+            rect.width,
+          );
+          const clipPx = element.scrollWidth - horizontalContentWidth;
           if (
             clipPx > LAYOUT_OVERFLOW_CONTAINER_TOLERANCE_PX &&
             style.textOverflow !== "ellipsis"

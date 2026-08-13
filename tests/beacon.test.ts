@@ -2385,6 +2385,23 @@ describe("layout-overflow signals", () => {
     clipped.remove();
     truncated.remove();
   });
+
+  test("does not treat a vertical scrollbar gutter as clipped content", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const main = document.createElement("main");
+    main.className = "main-content";
+    main.style.overflowX = "hidden";
+    main.style.overflowY = "auto";
+    mockRect(main, domRect(240, 958));
+    Object.defineProperty(main, "clientWidth", { value: 702 });
+    Object.defineProperty(main, "offsetWidth", { value: 718 });
+    Object.defineProperty(main, "scrollWidth", { value: 718 });
+    document.body.append(main);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    main.remove();
+  });
 });
 
 describe("ambient watchdog signals", () => {
