@@ -30,6 +30,7 @@ export const BEACON_SIGNAL = {
   CAPABILITY_FAILURE: "capability_failure",
   BLANK_APP_ROOT: "blank_app_root",
   CONSOLE_ERROR: "console_error",
+  CONTROL_COLLISION: "control_collision",
   CSP_VIOLATION: "csp_violation",
   CLIPBOARD_FAILURE: "clipboard_failure",
   DEAD_CLICK: "dead_click",
@@ -254,6 +255,13 @@ export type BeaconSignals = {
   /** Rejected clipboard writes, including failures handled by application
    * code. Clipboard contents are never captured. Default true. */
   clipboardFailures?: boolean;
+  /** Interactive controls from separate layout groups that overlap or render
+   * with effectively no spacing. Intentional control groups and positioned
+   * controls that merely touch are excluded. Default true. */
+  controlCollisions?: boolean;
+  /** Maximum non-overlapping gap that counts as touching controls. Default
+   * 1px. */
+  controlCollisionGapPx?: number;
   /** N rapid clicks in roughly the same spot. Default true. */
   rageClicks?: boolean;
   /** An interactive control clicked with no DOM/nav/scroll/focus/request response. Default true. */
@@ -399,6 +407,9 @@ export type BeaconSignals = {
   /** Visible surface area required for theme-polarity checks. Default
    *  10000px². */
   themeMismatchMinArea?: number;
+  /** Visible area required when the opposite-polarity surface is itself an
+   *  interactive control. Default 1500px². */
+  themeMismatchControlMinArea?: number;
   /** Visible WebGL canvases whose context remains lost after a restoration
    *  grace period. Default true. */
   webglContextLosses?: boolean;
@@ -1527,10 +1538,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const VIEWPORT_BUCKET_XL_PX = 1440;
   const OCCLUSION_SAMPLE_LIMIT = 25;
   const OCCLUSION_COVERAGE_MIN = 0.9;
+  const CONTROL_COLLISION_SAMPLE_LIMIT = 80;
+  const CONTROL_COLLISION_DEFAULT_GAP_PX = 1;
+  const CONTROL_COLLISION_MIN_CROSS_AXIS_RATIO = 0.5;
+  const CONTROL_COLLISION_OVERLAP_TOLERANCE_PX = 1;
   const INVISIBLE_TEXT_SAMPLE_LIMIT = 40;
   const INVISIBLE_TEXT_CONTRAST_MAX = 1.2;
   const THEME_SURFACE_SAMPLE_LIMIT = 200;
   const THEME_MISMATCH_DEFAULT_MIN_AREA = 10000;
+  const THEME_MISMATCH_CONTROL_DEFAULT_MIN_AREA = 1500;
   const THEME_DARK_SURFACE_LUMINANCE_MAX = 0.12;
   const THEME_LIGHT_SURFACE_LUMINANCE_MIN = 0.85;
   const STUCK_LOADING_DEFAULT_MS = 20000;
@@ -3182,6 +3198,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   //   occluded controls — an interactive control whose center is covered by
   //     an unrelated element (leaked scrims, z-index bugs). Skipped while a
   //     dialog is open, because covering the page is then intentional.
+  //   control collisions — controls in separate layout groups whose border
+  //     boxes overlap or leave effectively no visual spacing. Same-parent and
+  //     semantic button groups are exempt from the near-touching check.
   //   invisible text — sampled headings/controls whose text color composites
   //     to (nearly) the same color as their opaque background — the classic
   //     theme-token bug. Gradients/images and translucent stacks are skipped.
@@ -3201,6 +3220,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   ) {
     const detectOverflow = signals.layoutOverflows !== false;
     const detectOcclusion = signals.occludedControls !== false;
+    const detectControlCollision = signals.controlCollisions !== false;
     const detectInvisibleText = signals.invisibleText !== false;
     const detectStuckLoading = signals.stuckLoading !== false;
     const detectThemeMismatch = signals.themeMismatches !== false;
@@ -3212,6 +3232,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const stuckLoadingMs = signals.stuckLoadingMs ?? STUCK_LOADING_DEFAULT_MS;
     const themeMismatchMinArea =
       signals.themeMismatchMinArea ?? THEME_MISMATCH_DEFAULT_MIN_AREA;
+    const themeMismatchControlMinArea =
+      signals.themeMismatchControlMinArea ??
+      THEME_MISMATCH_CONTROL_DEFAULT_MIN_AREA;
+    const controlCollisionGapPx = Math.max(
+      0,
+      signals.controlCollisionGapPx ?? CONTROL_COLLISION_DEFAULT_GAP_PX,
+    );
     const seenOverflows = new Set<string>();
     let overflowReports = 0;
     let overflowTimer: ReturnType<typeof setTimeout> | undefined;
@@ -3440,6 +3467,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       right: number;
       top: number;
     };
+    const CONTROL_SELECTOR =
+      'a[href], button, input, select, textarea, [role="button"]';
+    const INTENTIONAL_CONTROL_GROUP_SELECTOR =
+      'nav, [role="group"], [role="menu"], [role="radiogroup"], [role="tablist"], [role="toolbar"]';
     const clipsAxis = (overflow: string): boolean =>
       overflow === "auto" ||
       overflow === "scroll" ||
@@ -3503,15 +3534,153 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       );
     };
 
+    const sharedIntentionalControlGroup = (
+      first: Element,
+      second: Element,
+    ): boolean => {
+      const firstGroup = first.closest(INTENTIONAL_CONTROL_GROUP_SELECTOR);
+
+      return (
+        firstGroup !== null &&
+        firstGroup === second.closest(INTENTIONAL_CONTROL_GROUP_SELECTOR)
+      );
+    };
+
+    const scanForControlCollisions = (): void => {
+      const viewportWidth = document.documentElement.clientWidth;
+      const viewportHeight = document.documentElement.clientHeight;
+      const controls: Array<{
+        element: Element;
+        positioned: boolean;
+        rect: VisibleRect;
+      }> = [];
+      for (const element of Array.from(
+        document.querySelectorAll(CONTROL_SELECTOR),
+      )) {
+        if (controls.length >= CONTROL_COLLISION_SAMPLE_LIMIT) break;
+        if (isScanExempt(element) || hasHiddenAncestor(element, true)) continue;
+        const rect = element.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const visible = visibleControlRect(
+          element,
+          rect,
+          viewportWidth,
+          viewportHeight,
+        );
+        if (visible === null) continue;
+        const position = window.getComputedStyle(element).position;
+        controls.push({
+          element,
+          positioned: position === "absolute" || position === "fixed",
+          rect: visible,
+        });
+      }
+
+      for (let firstIndex = 0; firstIndex < controls.length; firstIndex += 1) {
+        const first = controls[firstIndex];
+        if (first === undefined) continue;
+        for (
+          let secondIndex = firstIndex + 1;
+          secondIndex < controls.length;
+          secondIndex += 1
+        ) {
+          const second = controls[secondIndex];
+          if (second === undefined) continue;
+          if (
+            first.element.contains(second.element) ||
+            second.element.contains(first.element)
+          ) {
+            continue;
+          }
+          const overlapX =
+            Math.min(first.rect.right, second.rect.right) -
+            Math.max(first.rect.left, second.rect.left);
+          const overlapY =
+            Math.min(first.rect.bottom, second.rect.bottom) -
+            Math.max(first.rect.top, second.rect.top);
+          const isOverlap =
+            overlapX > CONTROL_COLLISION_OVERLAP_TOLERANCE_PX &&
+            overlapY > CONTROL_COLLISION_OVERLAP_TOLERANCE_PX;
+          if (isOverlap) {
+            const axis = overlapY <= overlapX ? "vertical" : "horizontal";
+            reportScanIssue(
+              first.element,
+              BEACON_SIGNAL.CONTROL_COLLISION,
+              `Control collision — ${describeElement(first.element)} overlaps ${describeElement(second.element)}`,
+              {
+                collidesWith: describeElement(second.element),
+                collisionAxis: axis,
+                collisionKind: "overlap",
+                overlapPx: String(
+                  Math.round(axis === "vertical" ? overlapY : overlapX),
+                ),
+              },
+            );
+            continue;
+          }
+
+          // Zero-spacing is common and intentional inside segmented controls,
+          // navs, and same-parent button rows. It is suspicious when separate
+          // layout groups collapse into each other, as in a panel footer laid
+          // directly against the preceding action row.
+          if (
+            first.element.parentElement === second.element.parentElement ||
+            sharedIntentionalControlGroup(first.element, second.element) ||
+            first.positioned ||
+            second.positioned
+          ) {
+            continue;
+          }
+          const firstWidth = first.rect.right - first.rect.left;
+          const secondWidth = second.rect.right - second.rect.left;
+          const firstHeight = first.rect.bottom - first.rect.top;
+          const secondHeight = second.rect.bottom - second.rect.top;
+          const horizontalGap = Math.max(
+            first.rect.left - second.rect.right,
+            second.rect.left - first.rect.right,
+            0,
+          );
+          const verticalGap = Math.max(
+            first.rect.top - second.rect.bottom,
+            second.rect.top - first.rect.bottom,
+            0,
+          );
+          const horizontalOverlapRatio =
+            Math.max(overlapX, 0) / Math.min(firstWidth, secondWidth);
+          const verticalOverlapRatio =
+            Math.max(overlapY, 0) / Math.min(firstHeight, secondHeight);
+          const verticalTouch =
+            verticalGap <= controlCollisionGapPx &&
+            horizontalOverlapRatio >= CONTROL_COLLISION_MIN_CROSS_AXIS_RATIO;
+          const horizontalTouch =
+            horizontalGap <= controlCollisionGapPx &&
+            verticalOverlapRatio >= CONTROL_COLLISION_MIN_CROSS_AXIS_RATIO;
+          if (!verticalTouch && !horizontalTouch) continue;
+          const axis = verticalTouch ? "vertical" : "horizontal";
+          reportScanIssue(
+            first.element,
+            BEACON_SIGNAL.CONTROL_COLLISION,
+            `Control collision — ${describeElement(first.element)} touches ${describeElement(second.element)}`,
+            {
+              collidesWith: describeElement(second.element),
+              collisionAxis: axis,
+              collisionKind: "touching",
+              gapPx: String(
+                Math.round(axis === "vertical" ? verticalGap : horizontalGap),
+              ),
+            },
+          );
+        }
+      }
+    };
+
     const scanForOcclusion = (): void => {
       if (typeof document.elementFromPoint !== "function") return;
       // While an overlay owns the page, covering the rest of it is the point.
       if (viewportCoveredByOverlay()) return;
       const viewportWidth = document.documentElement.clientWidth;
       const viewportHeight = document.documentElement.clientHeight;
-      const controls = document.querySelectorAll(
-        'a[href], button, input, select, textarea, [role="button"]',
-      );
+      const controls = document.querySelectorAll(CONTROL_SELECTOR);
       let sampled = 0;
       for (const control of Array.from(controls)) {
         if (sampled >= OCCLUSION_SAMPLE_LIMIT) return;
@@ -3824,7 +3993,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             continue;
           }
           const rect = element.getBoundingClientRect();
-          if (rect.width * rect.height < themeMismatchMinArea) continue;
+          const minimumArea = element.matches(CONTROL_SELECTOR)
+            ? themeMismatchControlMinArea
+            : themeMismatchMinArea;
+          if (rect.width * rect.height < minimumArea) continue;
           if (
             rect.bottom < 0 ||
             rect.top > viewportHeight ||
@@ -3975,6 +4147,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
     const runSettledScan = (): void => {
       if (detectOverflow) scanForOverflow();
+      if (detectControlCollision) scanForControlCollisions();
       if (detectOcclusion) scanForOcclusion();
       if (detectInvisibleText) scanForInvisibleText();
       if (detectThemeMismatch) scanForThemeMismatch();

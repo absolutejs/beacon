@@ -119,6 +119,13 @@ beacon.captureMessage("checkout started", "info");
   scroll containers, and absolutely positioned escapees (badges, popovers,
   drawers) are skipped by design; mark deliberate
   bleeds with `data-beacon-overflow="allow"`.
+- **Control-collision signals** — the same settled scan reports interactive
+  controls from separate layout groups whose border boxes overlap or render
+  with effectively no spacing. Same-parent rows, semantic control groups,
+  navigation, and positioned controls that merely touch are excluded so tabs,
+  segmented controls, and floating actions remain quiet. Tune the near-touch
+  threshold with `signals.controlCollisionGapPx`; intentional exceptions can
+  use `data-beacon-scan="allow"`.
 - **Ambient watchdogs** — silent failures users abandon instead of reporting
   become warning issues: scroll jail (a leaked modal scroll lock), stuck
   loading (`aria-busy`/`role="progressbar"` that never resolves), occluded
@@ -138,7 +145,10 @@ beacon.captureMessage("checkout started", "info");
   hidden, inert, transparent, and pointer-disabled control subtrees.
 - **Theme and loading contracts** — mark an application boundary with
   `data-beacon-theme="adaptive"` to report large opaque surfaces whose
-  luminance polarity contradicts the active light/dark mode. Intentional
+  luminance polarity contradicts the active light/dark mode. Interactive
+  controls use a smaller area threshold so light-only buttons do not disappear
+  inside an otherwise dark UI; tune it with
+  `signals.themeMismatchControlMinArea`. Intentional
   inverted brand/media surfaces use `data-beacon-theme="allow"`. Loading UI
   participates through native `aria-busy`/`role="progressbar"` semantics or
   `data-beacon-loading`, without coupling the SDK to framework class names.

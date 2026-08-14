@@ -4306,6 +4306,83 @@ describe("ambient watchdog signals", () => {
     document.elementFromPoint = originalFromPoint;
   });
 
+  test("reports controls from separate layout groups that touch", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const primaryRow = document.createElement("div");
+    const primary = document.createElement("button");
+    primary.className = "generate-email";
+    setRect(primary, rectOf(100, 700, 100, 146));
+    primaryRow.append(primary);
+    const channels = document.createElement("div");
+    const linkedIn = document.createElement("a");
+    linkedIn.className = "channel-cta";
+    linkedIn.href = "https://linkedin.example/profile";
+    setRect(linkedIn, rectOf(100, 320, 146, 184));
+    channels.append(linkedIn);
+    document.body.append(primaryRow, channels);
+
+    await settle(beacon);
+    const events = signalsSent(sent, "control_collision");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      collidesWith: "a.channel-cta",
+      collisionAxis: "vertical",
+      collisionKind: "touching",
+      gapPx: "0",
+      target: "button.generate-email",
+    });
+    primaryRow.remove();
+    channels.remove();
+  });
+
+  test("reports controls whose border boxes overlap", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const firstWrap = document.createElement("div");
+    const first = document.createElement("button");
+    first.className = "primary-action";
+    setRect(first, rectOf(100, 500, 100, 150));
+    firstWrap.append(first);
+    const secondWrap = document.createElement("div");
+    const second = document.createElement("button");
+    second.className = "secondary-action";
+    setRect(second, rectOf(100, 300, 144, 184));
+    secondWrap.append(second);
+    document.body.append(firstWrap, secondWrap);
+
+    await settle(beacon);
+    const events = signalsSent(sent, "control_collision");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      collidesWith: "button.secondary-action",
+      collisionAxis: "vertical",
+      collisionKind: "overlap",
+      overlapPx: "6",
+      target: "button.primary-action",
+    });
+    firstWrap.remove();
+    secondWrap.remove();
+  });
+
+  test("allows touching controls inside an intentional control group", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const toolbar = document.createElement("div");
+    toolbar.setAttribute("role", "toolbar");
+    const firstWrap = document.createElement("span");
+    const first = document.createElement("button");
+    setRect(first, rectOf(100, 200, 100, 140));
+    firstWrap.append(first);
+    const secondWrap = document.createElement("span");
+    const second = document.createElement("button");
+    setRect(second, rectOf(200, 300, 100, 140));
+    secondWrap.append(second);
+    toolbar.append(firstWrap, secondWrap);
+    document.body.append(toolbar);
+
+    await settle(beacon);
+    expect(signalsSent(sent, "control_collision")).toHaveLength(0);
+    toolbar.remove();
+  });
+
   test("does not report a control covered by browser-extension UI", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const button = document.createElement("button");
@@ -4586,6 +4663,48 @@ describe("ambient watchdog signals", () => {
       activeTheme: "dark",
       target: "section.payment-card",
     });
+    boundary.remove();
+    document.documentElement.style.colorScheme = "";
+  });
+
+  test("reports a small opposite-polarity interactive control", async () => {
+    document.documentElement.style.colorScheme = "dark";
+    const boundary = document.createElement("main");
+    boundary.setAttribute(BEACON_ATTRIBUTE.THEME, "adaptive");
+    const button = document.createElement("button");
+    button.className = "light-only-action";
+    button.textContent = "Open profile";
+    button.style.backgroundColor = "rgb(255, 255, 255)";
+    setRect(button, rectOf(0, 180, 0, 40));
+    boundary.append(button);
+    document.body.append(boundary);
+    const { beacon, sent } = makeWatchdogBeacon();
+
+    await settle(beacon);
+    const events = signalsSent(sent, "theme_mismatch");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      activeTheme: "dark",
+      target: "button.light-only-action",
+    });
+    boundary.remove();
+    document.documentElement.style.colorScheme = "";
+  });
+
+  test("keeps the larger theme threshold for non-interactive surfaces", async () => {
+    document.documentElement.style.colorScheme = "dark";
+    const boundary = document.createElement("main");
+    boundary.setAttribute(BEACON_ATTRIBUTE.THEME, "adaptive");
+    const decoration = document.createElement("section");
+    decoration.textContent = "Small intentional surface";
+    decoration.style.backgroundColor = "rgb(255, 255, 255)";
+    setRect(decoration, rectOf(0, 180, 0, 40));
+    boundary.append(decoration);
+    document.body.append(boundary);
+    const { beacon, sent } = makeWatchdogBeacon();
+
+    await settle(beacon);
+    expect(signalsSent(sent, "theme_mismatch")).toHaveLength(0);
     boundary.remove();
     document.documentElement.style.colorScheme = "";
   });
