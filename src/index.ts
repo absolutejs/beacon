@@ -234,6 +234,9 @@ export type BeaconResourceFailure = {
 export type BeaconSignals = {
   /** Back/forward navigations the browser could not restore from bfcache. */
   bfcacheBlocks?: boolean;
+  /** Browser-specific bfcache reason strings that are inherent to an
+   * application's required capabilities and therefore not actionable. */
+  ignoredBfcacheReasons?: string[];
   /** Marked application roots that settle without meaningful visible content. */
   blankAppRoots?: boolean;
   /** Delay before an application root is evaluated. Default 3000ms. */
@@ -368,9 +371,18 @@ export type BeaconSignals = {
   scrollJail?: boolean;
   /** Service-worker registration and installation failures. Default true. */
   serviceWorkerFailures?: boolean;
+  /** Grace period for a transient service-worker registration failure to
+   *  recover through an application retry before it becomes an issue. Persistent
+   *  browser rejections still report immediately. Default 8000ms. */
+  serviceWorkerRecoveryMs?: number;
   /** Abnormal WebSocket closes (`wasClean: false` or non-normal codes).
    *  Default true. */
   socketAbnormalCloses?: boolean;
+  /** Endpoints whose client explicitly owns reconnect/resume. An isolated
+   *  abnormal close is suppressed for matching URLs, while every close still
+   *  counts toward socket-flapping detection. String patterns are URL/path
+   *  prefixes; RegExp patterns match the full URL. */
+  recoverableSockets?: Array<RegExp | string>;
   /** WebSocket connect/close cycles to one URL tripping a flap report.
    *  Default true. */
   socketFlapping?: boolean;
@@ -930,12 +942,21 @@ const FACEBOOK_IOS_HOST_INJECTION = new Set([
 ]);
 const META_IOS_WEBKIT_BRIDGE_FAILURE =
   "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')";
+const META_IOS_WEBKIT_BRIDGE_FAILURES = new Set([
+  META_IOS_WEBKIT_BRIDGE_FAILURE,
+]);
+const matchesErrorMessage = (
+  event: Pick<BeaconEvent, "message" | "name">,
+  expected: ReadonlySet<string>,
+) =>
+  expected.has(event.message) ||
+  expected.has(`${event.name}: ${event.message}`);
 const isInstagramIosBridgeInjection = (
-  event: Pick<BeaconEvent, "message" | "stack">,
+  event: Pick<BeaconEvent, "message" | "name" | "stack">,
   userAgent: string,
 ) =>
   INSTAGRAM_IOS_IN_APP_BROWSER.test(userAgent) &&
-  event.message === META_IOS_WEBKIT_BRIDGE_FAILURE &&
+  matchesErrorMessage(event, META_IOS_WEBKIT_BRIDGE_FAILURES) &&
   event.stack?.includes("sendDataToNative") === true &&
   event.stack.includes("sendPageHideMessage");
 const FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE =
@@ -970,7 +991,7 @@ export const isKnownBeaconNoise = (
   (event.name === "UnhandledRejection" &&
     CEF_SHARP_REJECTION.test(event.message)) ||
   (FACEBOOK_IOS_IN_APP_BROWSER.test(userAgent) &&
-    FACEBOOK_IOS_HOST_INJECTION.has(event.message)) ||
+    matchesErrorMessage(event, FACEBOOK_IOS_HOST_INJECTION)) ||
   isInstagramIosBridgeInjection(event, userAgent) ||
   isInjectedServiceWorkerRejection(event) ||
   (event.name === "Error" &&
@@ -1151,6 +1172,7 @@ const LONG_IDENTIFIER_SEGMENT = /\b(?:[0-9a-f]{16,}|\d{8,})\b/giu;
 const VOLATILE_SIGNAL_TAGS = new Set([
   "actionId",
   "blockingDurationMs",
+  "blockingFrameDurationMs",
   "blockerLocations",
   "blockerScope",
   "closeCount",
@@ -1158,10 +1180,13 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "durationMs",
   "elapsedMs",
   "errorCount",
+  "inputDelayMs",
   "interactionId",
   "loadCount",
   "newestRelease",
   "obscuredPx",
+  "presentationDelayMs",
+  "processingDurationMs",
   "responseMs",
   "shiftValue",
   "signal",
@@ -1572,13 +1597,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const SSE_FLAP_DEFAULT_COUNT = 4;
   const SSE_FLAP_DEFAULT_WINDOW_MS = 60000;
   const STALLED_STREAM_DEFAULT_MS = 60000;
+  const SERVICE_WORKER_RECOVERY_DEFAULT_MS = 8000;
   const MODAL_FOCUS_SETTLE_MS = 100;
   const MAIN_THREAD_STALL_DEFAULT_MS = 200;
   const MAIN_THREAD_STALL_DEFAULT_COUNT = 3;
   const MAIN_THREAD_STALL_DEFAULT_WINDOW_MS = 10000;
   const RELOAD_LOOP_COUNT = 4;
   const RELOAD_LOOP_WINDOW_MS = 60000;
-  const RELOAD_LOOP_STORAGE_KEY = "beacon:reload-history-v2";
+  const NAVIGATION_INTENT_MAX_AGE_MS = 30000;
+  // v4 excludes document loads immediately following an intentional form or
+  // same-tab link navigation. Do not inherit v3 history: a login submission
+  // redirected back to the same path may already have polluted that streak.
+  const RELOAD_LOOP_STORAGE_KEY = "beacon:reload-history-v4";
+  const NAVIGATION_INTENT_STORAGE_KEY = "beacon:navigation-intent-v1";
   const STALE_RELEASE_STORAGE_KEY = "beacon:release-first-seen";
   const STALE_RELEASE_GRACE_MS = 600000;
   const STALE_RELEASE_HISTORY_LIMIT = 5;
@@ -1787,6 +1818,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     pendingClickCleanups.clear();
   });
   let flushPendingNetworkFailures = (): void => {};
+  let pendingNavigationIntentAt: number | undefined;
   let tags: BeaconTags = {};
   let user: { id?: string; email?: string } | undefined;
   let actionSequence = 0;
@@ -2591,9 +2623,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               ? animationFrame.blockingDuration
               : entry.duration;
           if (blockingDuration < stallMs) continue;
-          const now = Date.now();
-          stallTimes = stallTimes.filter((at) => now - at < stallWindowMs);
-          stallTimes.push(now);
+          // PerformanceObserver may deliver several buffered entries in one
+          // callback. Date.now() would give every entry the same timestamp and
+          // turn unrelated historical frames into a false burst. startTime is
+          // the entry's monotonic time relative to this document.
+          const entryAt = entry.startTime;
+          stallTimes = stallTimes.filter(
+            (at) => entryAt >= at && entryAt - at < stallWindowMs,
+          );
+          stallTimes.push(entryAt);
           if (stallTimes.length < stallCount) continue;
           reported = true;
           const script = [...(animationFrame.scripts ?? [])].sort(
@@ -2663,6 +2701,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
 
     if (signals.bfcacheBlocks !== false && typeof performance !== "undefined") {
+      const ignoredBfcacheReasons = new Set(
+        signals.ignoredBfcacheReasons ?? [],
+      );
       const navigation = performance.getEntriesByType("navigation")[0] as
         | (PerformanceNavigationTiming & {
             notRestoredReasons?: {
@@ -2693,7 +2734,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             .map((reason) => reason.reason)
             .filter(
               (reason): reason is string =>
-                typeof reason === "string" && reason !== "masked",
+                typeof reason === "string" &&
+                reason !== "masked" &&
+                !ignoredBfcacheReasons.has(reason),
             )
             .slice(0, 10);
           for (const reason of nodeReasons) reasons.add(reason);
@@ -3379,6 +3422,20 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         const rect = element.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) return;
         if (
+          rect.width <= 2 &&
+          rect.height <= 2 &&
+          (style.overflowX === "hidden" ||
+            style.overflowX === "clip" ||
+            style.overflowY === "hidden" ||
+            style.overflowY === "clip")
+        ) {
+          // Screen-reader-only labels and live regions commonly use a 1px
+          // clipped box while retaining their full text in the accessibility
+          // tree. Their scroll dimensions describe intentionally hidden copy,
+          // not visible application content being cut off.
+          return;
+        }
+        if (
           (style.position === "absolute" || style.position === "fixed") &&
           (rect.right <= 0 ||
             rect.left >= viewportRight ||
@@ -3546,6 +3603,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       );
     };
 
+    const crossesDialogBoundary = (
+      first: Element,
+      second: Element,
+    ): boolean => {
+      const firstDialog = first.closest('[role="dialog"], dialog');
+      const secondDialog = second.closest('[role="dialog"], dialog');
+
+      return (firstDialog === null) !== (secondDialog === null);
+    };
+
     const scanForControlCollisions = (): void => {
       const viewportWidth = document.documentElement.clientWidth;
       const viewportHeight = document.documentElement.clientHeight;
@@ -3588,7 +3655,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           if (second === undefined) continue;
           if (
             first.element.contains(second.element) ||
-            second.element.contains(first.element)
+            second.element.contains(first.element) ||
+            crossesDialogBoundary(first.element, second.element)
           ) {
             continue;
           }
@@ -3602,6 +3670,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             overlapX > CONTROL_COLLISION_OVERLAP_TOLERANCE_PX &&
             overlapY > CONTROL_COLLISION_OVERLAP_TOLERANCE_PX;
           if (isOverlap) {
+            // Password visibility toggles, clear buttons, and similar embedded
+            // field actions are positioned over reserved input padding. Keep
+            // ordinary same-parent controls actionable, but do not call this
+            // deliberate positioned composition a collision.
+            if (
+              first.element.parentElement === second.element.parentElement &&
+              (first.positioned || second.positioned)
+            ) {
+              continue;
+            }
             const axis = overlapY <= overlapX ? "vertical" : "horizontal";
             reportScanIssue(
               first.element,
@@ -4047,7 +4125,34 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     //   poll catches spinners that hang while the user does nothing at all.
     const loadingFirstSeen = new WeakMap<Element, number>();
     const reportedStuckLoading = new WeakSet<Element>();
+    const trackedLoadingIndicators = new Set<Element>();
+    let lastLoadingCheckAt: number | undefined;
     const loadingIndicatorSelector = `[aria-busy="true"], [role="progressbar"], [${BEACON_ATTRIBUTE.LOADING}]`;
+    const resetLoadingIndicator = (indicator: Element): void => {
+      loadingFirstSeen.delete(indicator);
+      reportedStuckLoading.delete(indicator);
+      trackedLoadingIndicators.delete(indicator);
+    };
+    const loadingLifecycleObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        if (!(record.target instanceof Element)) continue;
+        // A persistent control can resolve and enter a later loading cycle
+        // between the five-second polls. Its old first-seen/report state must
+        // not leak into that new operation.
+        resetLoadingIndicator(record.target);
+      }
+    });
+    loadingLifecycleObserver.observe(document.documentElement, {
+      attributeFilter: [
+        "aria-busy",
+        "role",
+        BEACON_ATTRIBUTE.LOADING,
+        BEACON_ATTRIBUTE.LOADING_TIMEOUT,
+      ],
+      attributes: true,
+      subtree: true,
+    });
+    cleanups.push(() => loadingLifecycleObserver.disconnect());
     const isPersistentDeterminateProgress = (indicator: Element): boolean =>
       indicator.getAttribute("role") === "progressbar" &&
       indicator.hasAttribute("aria-valuenow") &&
@@ -4081,18 +4186,44 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
     const checkStuckLoading = (): void => {
       if (document.visibilityState === "hidden") return;
-      const indicators = document.querySelectorAll(loadingIndicatorSelector);
       const now = Date.now();
-      for (const indicator of Array.from(indicators)) {
-        if (isPersistentDeterminateProgress(indicator)) continue;
-        if (isScanExempt(indicator)) continue;
-        if (hasHiddenAncestor(indicator)) continue;
-        if (hasTrackedLoadingAncestor(indicator)) continue;
+      const missedPollWindow =
+        lastLoadingCheckAt !== undefined &&
+        now - lastLoadingCheckAt > STUCK_LOADING_POLL_MS * 3;
+      lastLoadingCheckAt = now;
+      const indicators = Array.from(
+        document.querySelectorAll(loadingIndicatorSelector),
+      );
+      const activeIndicators = new Set(indicators);
+      for (const tracked of trackedLoadingIndicators) {
+        if (!activeIndicators.has(tracked)) resetLoadingIndicator(tracked);
+      }
+      for (const indicator of indicators) {
+        if (
+          isPersistentDeterminateProgress(indicator) ||
+          isScanExempt(indicator) ||
+          hasHiddenAncestor(indicator) ||
+          hasTrackedLoadingAncestor(indicator)
+        ) {
+          resetLoadingIndicator(indicator);
+          continue;
+        }
         const rect = indicator.getBoundingClientRect();
-        if (rect.width === 0 && rect.height === 0) continue;
+        if (rect.width === 0 && rect.height === 0) {
+          resetLoadingIndicator(indicator);
+          continue;
+        }
+        if (missedPollWindow && loadingFirstSeen.has(indicator)) {
+          // A background tab, sleeping device, or blocked event loop can miss
+          // many polls. Wall-clock time during that blind window is not proof
+          // the loading UI stayed visible and interactive; restart its visible
+          // deadline now that observation has resumed.
+          loadingFirstSeen.set(indicator, now);
+        }
         const firstSeen = loadingFirstSeen.get(indicator);
         if (firstSeen === undefined) {
           loadingFirstSeen.set(indicator, now);
+          trackedLoadingIndicators.add(indicator);
           continue;
         }
         const deadlineMs = loadingDeadlineMs(indicator);
@@ -4145,12 +4276,35 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       }
     };
 
+    const documentStylesAreReady = (): boolean => {
+      const stylesheets = Array.from(
+        document.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"]'),
+      ).filter((link) => {
+        if (link.disabled) return false;
+        const media = link.media.trim();
+
+        return (
+          media === "" ||
+          typeof window.matchMedia !== "function" ||
+          window.matchMedia(media).matches
+        );
+      });
+
+      return stylesheets.every((link) => link.sheet !== null);
+    };
+
     const runSettledScan = (): void => {
-      if (detectOverflow) scanForOverflow();
-      if (detectControlCollision) scanForControlCollisions();
-      if (detectOcclusion) scanForOcclusion();
-      if (detectInvisibleText) scanForInvisibleText();
-      if (detectThemeMismatch) scanForThemeMismatch();
+      // Geometry and computed colors are meaningless while an active
+      // stylesheet failed to attach. Resource instrumentation owns that
+      // failure; emitting dozens of collisions from the unstyled fallback DOM
+      // would hide the single actionable cause.
+      const visualStylesReady = documentStylesAreReady();
+      if (detectOverflow && visualStylesReady) scanForOverflow();
+      if (detectControlCollision && visualStylesReady)
+        scanForControlCollisions();
+      if (detectOcclusion && visualStylesReady) scanForOcclusion();
+      if (detectInvisibleText && visualStylesReady) scanForInvisibleText();
+      if (detectThemeMismatch && visualStylesReady) scanForThemeMismatch();
       if (detectStuckLoading) checkStuckLoading();
     };
 
@@ -5627,10 +5781,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const closesByUrl = new Map<string, number[]>();
     const reportedSockets = new Set<string>();
     const reportedAbnormalCloses = new Set<string>();
+    const recoverableSocket = (url: string): boolean =>
+      (signals.recoverableSockets ?? []).some((pattern) =>
+        typeof pattern === "string"
+          ? url.startsWith(pattern) || shortUrl(url).startsWith(pattern)
+          : pattern.test(url),
+      );
     const wrappedWebSocket = new Proxy(OriginalWebSocket, {
       construct(target, args: unknown[]): object {
         const socket = Reflect.construct(target, args) as unknown as WebSocket;
-        const label = shortUrl(String(args[0]));
+        const socketUrl = String(args[0]);
+        const label = shortUrl(socketUrl);
         const socketLifecycleGeneration = pageLifecycleGeneration;
         let applicationClose = false;
         const originalClose = socket.close.bind(socket);
@@ -5649,7 +5810,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             signals.socketAbnormalCloses !== false &&
             typeof CloseEvent !== "undefined" &&
             event instanceof CloseEvent &&
-            !event.wasClean
+            !event.wasClean &&
+            !recoverableSocket(socketUrl)
           ) {
             const abnormalKey = `${label}|${event.code}`;
             if (!reportedAbnormalCloses.has(abnormalKey)) {
@@ -5849,6 +6011,16 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const container = navigator.serviceWorker;
       const reportedServiceWorkerFailures = new Set<string>();
       const serviceWorkerListenerCleanups: Array<() => void> = [];
+      const pendingRegistrationFailures = new Map<
+        string,
+        { error: Error; timeout: ReturnType<typeof setTimeout> }
+      >();
+      const transientRegistrationErrors = new Set([
+        "AbortError",
+        "NetworkError",
+        "TimeoutError",
+        "TypeError",
+      ]);
       const reportServiceWorkerFailure = (
         endpointLabel: string,
         failureKind: "installation" | "messageerror" | "registration",
@@ -5934,14 +6106,45 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           if (isServiceWorkerRegistration(registration)) {
             watchRegistration(registration);
           }
+          const pendingFailure = pendingRegistrationFailures.get(endpointLabel);
+          if (pendingFailure !== undefined) {
+            clearTimeout(pendingFailure.timeout);
+            pendingRegistrationFailures.delete(endpointLabel);
+          }
 
           return registration;
         } catch (error) {
-          reportServiceWorkerFailure(
-            endpointLabel,
-            "registration",
-            toError(error),
-          );
+          const registrationError = toError(error);
+          if (transientRegistrationErrors.has(registrationError.name)) {
+            const existing = pendingRegistrationFailures.get(endpointLabel);
+            if (existing !== undefined) {
+              existing.error = registrationError;
+            } else {
+              const recoveryMs = Math.max(
+                0,
+                signals.serviceWorkerRecoveryMs ??
+                  SERVICE_WORKER_RECOVERY_DEFAULT_MS,
+              );
+              const pending = {
+                error: registrationError,
+                timeout: setTimeout(() => {
+                  pendingRegistrationFailures.delete(endpointLabel);
+                  reportServiceWorkerFailure(
+                    endpointLabel,
+                    "registration",
+                    pending.error,
+                  );
+                }, recoveryMs),
+              };
+              pendingRegistrationFailures.set(endpointLabel, pending);
+            }
+          } else {
+            reportServiceWorkerFailure(
+              endpointLabel,
+              "registration",
+              registrationError,
+            );
+          }
           throw error;
         }
       };
@@ -5951,6 +6154,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       container.addEventListener("messageerror", onMessageError);
       cleanups.push(() => {
         container.removeEventListener("messageerror", onMessageError);
+        for (const pending of pendingRegistrationFailures.values()) {
+          clearTimeout(pending.timeout);
+        }
+        pendingRegistrationFailures.clear();
         for (const cleanup of serviceWorkerListenerCleanups.splice(
           0,
           serviceWorkerListenerCleanups.length,
@@ -5967,8 +6174,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   }
 
   // ——— Boot-time watchdogs ——————————————————————————————————————————————
-  // Reload loop: several full page loads inside a minute — a crash loop, a
-  // reload loop, or a user mashing refresh against a broken page.
+  // Reload loop: several uninterrupted same-route document loads inside a
+  // minute — a crash loop, redirect bounce, or a user mashing refresh against
+  // a broken page. A different app route breaks the streak. So does a fresh
+  // external entry (including an OAuth/SAML return) or an accepted service
+  // worker update: neither is evidence that this route reloaded itself.
   if (
     signals !== null &&
     signals.reloadLoops !== false &&
@@ -5987,7 +6197,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         const route = shortUrl(location.href);
         const raw = sessionStorage.getItem(RELOAD_LOOP_STORAGE_KEY);
         const parsed: unknown = raw === null ? [] : JSON.parse(raw);
-        const history = (Array.isArray(parsed) ? parsed : []).filter(
+        let history = (Array.isArray(parsed) ? parsed : []).filter(
           (entry): entry is { at: number; route: string } =>
             entry !== null &&
             typeof entry === "object" &&
@@ -5995,18 +6205,72 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             typeof (entry as { route?: unknown }).route === "string" &&
             now - (entry as { at: number }).at < RELOAD_LOOP_WINDOW_MS,
         );
+
+        let entryKind = "app";
+        const rawNavigationIntent = sessionStorage.getItem(
+          NAVIGATION_INTENT_STORAGE_KEY,
+        );
+        sessionStorage.removeItem(NAVIGATION_INTENT_STORAGE_KEY);
+        const navigationIntentAt = Number(rawNavigationIntent);
+        if (
+          rawNavigationIntent !== null &&
+          Number.isFinite(navigationIntentAt) &&
+          now - navigationIntentAt >= 0 &&
+          now - navigationIntentAt <= NAVIGATION_INTENT_MAX_AGE_MS
+        ) {
+          // A form submission or same-tab link may legitimately return to the
+          // exact same URL (invalid credentials, account switching, payment
+          // authorization). That is a new user-directed navigation, not a page
+          // repeatedly reloading itself.
+          history = [];
+          entryKind = "intentional-navigation";
+        }
+        if (document.referrer !== "") {
+          const referrer = new URL(document.referrer, location.href);
+          if (referrer.origin !== location.origin) {
+            // Authentication providers, payment providers, search results, and
+            // ordinary external links are new journeys into the app. Do not
+            // join them to page loads from before the user left our origin.
+            history = [];
+            entryKind = "external";
+          } else {
+            const controllerScript =
+              navigator.serviceWorker?.controller?.scriptURL;
+            if (
+              controllerScript !== undefined &&
+              new URL(controllerScript, location.href).pathname ===
+                referrer.pathname
+            ) {
+              // controllerchange reloads are explicit app-update handoffs. Some
+              // browsers expose the worker script as the document referrer.
+              history = [];
+              entryKind = "service-worker-update";
+            }
+          }
+        }
+
         history.push({ at: now, route });
         sessionStorage.setItem(
           RELOAD_LOOP_STORAGE_KEY,
           JSON.stringify(history),
         );
-        const routeLoads = history.filter((entry) => entry.route === route);
-        if (routeLoads.length >= RELOAD_LOOP_COUNT) {
+        let loadCount = 0;
+        for (let index = history.length - 1; index >= 0; index -= 1) {
+          if (history[index]?.route !== route) break;
+          loadCount += 1;
+        }
+        // Emit once when a streak crosses the threshold. Continuing loops do
+        // not create one duplicate issue event per subsequent document load.
+        if (loadCount === RELOAD_LOOP_COUNT) {
+          const firstLoad = history.at(-loadCount)?.at ?? now;
           emitSignal(
             `Reload loop — repeated page loads within a minute — ${shortUrl(location.href)}`,
             {
-              loadCount: String(routeLoads.length),
+              entryKind,
+              loadCount: String(loadCount),
+              navigationType: navigation?.type ?? "unknown",
               signal: BEACON_SIGNAL.RELOAD_LOOP,
+              windowMs: String(now - firstLoad),
             },
           );
         }
@@ -6072,17 +6336,86 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     signals !== null &&
     signals.fontFailures !== false &&
     typeof document !== "undefined" &&
-    "fonts" in document
+    "fonts" in document &&
+    (typeof navigator === "undefined" || navigator.webdriver !== true)
   ) {
     const reportedFonts = new Set<string>();
+    const checkingFonts = new Set<string>();
+    const normalizedFamily = (family: string): string =>
+      family
+        .trim()
+        .replace(/^(['"])(.*)\1$/u, "$2")
+        .toLowerCase();
+    const isRendered = (element: HTMLElement): boolean => {
+      for (
+        let current: HTMLElement | null = element;
+        current !== null;
+        current = current.parentElement
+      ) {
+        const style = window.getComputedStyle(current);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          style.visibility === "collapse" ||
+          Number.parseFloat(style.opacity || "1") <= 0.01
+        ) {
+          return false;
+        }
+      }
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const affectedElement = (family: string): HTMLElement | null => {
+      const expected = normalizedFamily(family);
+      for (const element of document.querySelectorAll<HTMLElement>("body *")) {
+        if (!isRendered(element)) continue;
+        const style = window.getComputedStyle(element);
+        const families = style.fontFamily.split(",").map(normalizedFamily);
+        if (families.includes(expected)) return element;
+      }
+      return null;
+    };
+    const reportFontFailure = (
+      face: FontFace,
+      element: HTMLElement,
+      key: string,
+    ): void => {
+      reportedFonts.add(key);
+      emitSignal(
+        `Font failure — ${face.family} failed to load — ${shortUrl(location.href)}`,
+        {
+          fontFamily: face.family,
+          fontStretch: face.stretch,
+          fontStyle: face.style,
+          fontWeight: face.weight,
+          signal: BEACON_SIGNAL.FONT_FAILURE,
+          target: describeElement(element),
+        },
+      );
+    };
+    const verifyFontFailure = async (face: FontFace): Promise<void> => {
+      const key = [face.family, face.style, face.weight, face.stretch].join(
+        "|",
+      );
+      if (reportedFonts.has(key) || checkingFonts.has(key)) return;
+      const element = affectedElement(face.family);
+      if (element === null) return;
+      checkingFonts.add(key);
+      const sample = element.textContent?.trim().slice(0, 64) || "BESbswy";
+      const font = `${face.style} ${face.weight} ${face.stretch} 16px ${JSON.stringify(face.family)}`;
+      try {
+        await document.fonts.load(font, sample);
+        if (document.fonts.check(font, sample)) return;
+      } catch {
+        // A rejected explicit load is itself confirmation of the failure.
+      } finally {
+        checkingFonts.delete(key);
+      }
+      reportFontFailure(face, element, key);
+    };
     const sweepFonts = (): void => {
       document.fonts.forEach((face) => {
-        if (face.status !== "error" || reportedFonts.has(face.family)) return;
-        reportedFonts.add(face.family);
-        emitSignal(
-          `Font failure — ${face.family} failed to load — ${shortUrl(location.href)}`,
-          { fontFamily: face.family, signal: BEACON_SIGNAL.FONT_FAILURE },
-        );
+        if (face.status === "error") void verifyFontFailure(face);
       });
     };
     const fontsReady: Promise<unknown> | undefined = document.fonts.ready;
@@ -6090,9 +6423,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       void fontsReady.then(sweepFonts).catch(() => undefined);
     }
     if (typeof document.fonts.addEventListener === "function") {
-      document.fonts.addEventListener("loadingerror", sweepFonts);
+      const handleLoadingError = (): void => sweepFonts();
+      document.fonts.addEventListener("loadingerror", handleLoadingError);
       cleanups.push(() =>
-        document.fonts.removeEventListener("loadingerror", sweepFonts),
+        document.fonts.removeEventListener("loadingerror", handleLoadingError),
       );
     }
   }
@@ -6413,6 +6747,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     // so discard only pending generic transport failures during page teardown.
     // Offline and timeout failures remain actionable and are still flushed.
     pendingNetworkFailures.delete("transport");
+    if (
+      pendingNavigationIntentAt !== undefined &&
+      Date.now() - pendingNavigationIntentAt <= NAVIGATION_INTENT_MAX_AGE_MS
+    ) {
+      try {
+        sessionStorage.setItem(
+          NAVIGATION_INTENT_STORAGE_KEY,
+          String(Date.now()),
+        );
+      } catch {
+        // Storage unavailable — reload-loop detection already degrades safely.
+      }
+    }
     void flush(true);
   };
   const onPageShow = (event: PageTransitionEvent): void => {
@@ -6422,12 +6769,34 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const onVisibilityChange = (): void => {
     if (document.visibilityState === "hidden") void flush(true);
   };
+  const onNavigationIntent = (event: Event): void => {
+    if (event.type === "submit") {
+      pendingNavigationIntentAt = Date.now();
+      return;
+    }
+    if (!(event instanceof MouseEvent) || event.button !== 0) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey)
+      return;
+    const target = event.target instanceof Element ? event.target : null;
+    const anchor = target?.closest("a[href]");
+    if (
+      anchor instanceof HTMLAnchorElement &&
+      anchor.target !== "_blank" &&
+      !anchor.hasAttribute("download")
+    ) {
+      pendingNavigationIntentAt = Date.now();
+    }
+  };
   window.addEventListener("pagehide", onPageHide);
   window.addEventListener("pageshow", onPageShow);
+  document.addEventListener("click", onNavigationIntent, true);
+  document.addEventListener("submit", onNavigationIntent, true);
   document.addEventListener("visibilitychange", onVisibilityChange);
   cleanups.push(
     () => window.removeEventListener("pagehide", onPageHide),
     () => window.removeEventListener("pageshow", onPageShow),
+    () => document.removeEventListener("click", onNavigationIntent, true),
+    () => document.removeEventListener("submit", onNavigationIntent, true),
     () => document.removeEventListener("visibilitychange", onVisibilityChange),
   );
 

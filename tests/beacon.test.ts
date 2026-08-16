@@ -57,7 +57,8 @@ afterEach(async () => {
   for (const beacon of open.splice(0, open.length)) await beacon.close();
   // Every createBeacon in this file is one "page load" to the boot-time
   // watchdogs — clear their storage so tests don't read as a reload loop.
-  sessionStorage.removeItem("beacon:reload-history-v2");
+  sessionStorage.removeItem("beacon:reload-history-v4");
+  sessionStorage.removeItem("beacon:navigation-intent-v1");
   localStorage.removeItem("beacon:release-first-seen");
 });
 
@@ -1206,6 +1207,10 @@ describe("auto-instrumentation", () => {
   test.each([
     ["Can't find variable: _AutofillCallbackHandler", "ReferenceError"],
     [
+      "undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+      "TypeError",
+    ],
+    [
       "TypeError: undefined is not an object (evaluating 'window.webkit.messageHandlers')",
       "Error",
     ],
@@ -1255,6 +1260,55 @@ describe("auto-instrumentation", () => {
     expect(
       isKnownBeaconNoise(event, "Mozilla/5.0 Mobile/23F84 Safari/604.1"),
     ).toBe(false);
+  });
+
+  test("drops Instagram iOS bridge noise through global error capture", async () => {
+    const userAgentDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "userAgent",
+    );
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value:
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) " +
+        "AppleWebKit/605.1.15 Mobile/23G71 Instagram 439.0.0.35.60 " +
+        "(iPhone15,3; iOS 26_6; en_US; en; scale=3.00; 1290x2796; " +
+        "IABMV/1; 1021301964) Safari/604.1",
+    });
+    try {
+      const sent: BeaconEnvelope[] = [];
+      const beacon = track(
+        createBeacon({
+          instrument: { globalErrors: true },
+          project: "web",
+          transport: ({ body }) => {
+            sent.push(JSON.parse(body) as BeaconEnvelope);
+          },
+        }),
+      );
+      const error = new TypeError(
+        "undefined is not an object (evaluating 'window.webkit.messageHandlers')",
+      );
+      error.stack =
+        "sendDataToNative@https://www.example.com/:1:1142\n" +
+        "sendPageHideMessage@https://www.example.com/:1:3712\n" +
+        "@https://www.example.com/:1:5421";
+      window.dispatchEvent(
+        new ErrorEvent("error", {
+          error,
+          message: error.message,
+        }),
+      );
+      await beacon.flush();
+
+      expect(sent).toHaveLength(0);
+    } finally {
+      if (userAgentDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "userAgent");
+      } else {
+        Object.defineProperty(navigator, "userAgent", userAgentDescriptor);
+      }
+    }
   });
 
   test("preserves application WebKit errors in Instagram's iOS browser", () => {
@@ -2244,6 +2298,39 @@ describe("layout-overflow signals", () => {
     wide.remove();
   });
 
+  test("does not scan unstyled fallback DOM after an active stylesheet fails", async () => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "/missing-app.css";
+    const element = document.createElement("button");
+    element.className = "absolute inset-0";
+    document.head.append(link);
+    document.body.append(element);
+    mockRect(element, domRect(0, 1_296));
+    const { beacon, sent } = make({
+      signals: {
+        controlCollisions: true,
+        layoutOverflowSettleMs: 5,
+        layoutOverflows: true,
+      },
+    });
+    track(beacon);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await beacon.flush();
+
+    expect(link.sheet).toBeNull();
+    expect(
+      sent.flatMap((envelope) =>
+        envelope.events.filter(
+          (event) => event.tags?.signal === "layout_overflow",
+        ),
+      ),
+    ).toHaveLength(0);
+    element.remove();
+    link.remove();
+  });
+
   test("reports an unclassed app image with privacy-safe overflow provenance", async () => {
     const { beacon, sent } = makeOverflowBeacon();
     const parent = document.createElement("figure");
@@ -2384,6 +2471,23 @@ describe("layout-overflow signals", () => {
     expect(event?.message).toContain("div.cut-label");
     clipped.remove();
     truncated.remove();
+  });
+
+  test("ignores clipped screen-reader-only live regions", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const liveRegion = document.createElement("div");
+    liveRegion.id = "announcement";
+    liveRegion.setAttribute("aria-live", "polite");
+    liveRegion.style.overflow = "hidden";
+    liveRegion.style.position = "fixed";
+    mockRect(liveRegion, { ...domRect(0, 1), bottom: 1, height: 1 });
+    Object.defineProperty(liveRegion, "scrollWidth", { value: 399 });
+    Object.defineProperty(liveRegion, "clientWidth", { value: 1 });
+    document.body.append(liveRegion);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    liveRegion.remove();
   });
 
   test("does not treat a vertical scrollbar gutter as clipped content", async () => {
@@ -2565,6 +2669,44 @@ describe("ambient watchdog signals", () => {
       } else {
         Object.defineProperty(performance, "getEntriesByType", ownDescriptor);
       }
+    }
+  });
+
+  test("ignores configured inherent bfcache reasons but keeps actionable ones", async () => {
+    const originalEntries = performance.getEntriesByType.bind(performance);
+    performance.getEntriesByType = ((type: string) =>
+      type === "navigation"
+        ? [
+            {
+              notRestoredReasons: {
+                children: [],
+                reasons: [
+                  { reason: "audio-capture" },
+                  { reason: "unload-listener" },
+                ],
+                url: "https://app.test/intake",
+              },
+              type: "back_forward",
+            } as unknown as PerformanceNavigationTiming,
+          ]
+        : originalEntries(type)) as typeof performance.getEntriesByType;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { ignoredBfcacheReasons: ["audio-capture"] },
+      });
+      await beacon.flush();
+      const events = signalsSent(sent, "bfcache_blocked");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags?.reasons).toBe("unload-listener");
+      expect(events[0]?.extra?.bfcacheBlockers).toEqual([
+        {
+          depth: 0,
+          location: "https://app.test/intake",
+          reasons: ["unload-listener"],
+        },
+      ]);
+    } finally {
+      performance.getEntriesByType = originalEntries;
     }
   });
 
@@ -3046,11 +3188,12 @@ describe("ambient watchdog signals", () => {
           {
             getEntries: () =>
               durations.map(
-                (duration) =>
+                (duration, index) =>
                   ({
                     blockingDuration: duration,
                     duration,
                     entryType: "long-animation-frame",
+                    startTime: index * 1_000,
                   }) as unknown as PerformanceEntry,
               ),
           } as PerformanceObserverEntryList,
@@ -3124,6 +3267,50 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("does not collapse spaced buffered stalls into one burst", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(): void {
+        this.callback(
+          {
+            getEntries: () =>
+              [
+                { blockingDuration: 220, startTime: 1_000 },
+                { blockingDuration: 230, startTime: 21_000 },
+                { blockingDuration: 240, startTime: 41_000 },
+              ].map(
+                ({ blockingDuration, startTime }) =>
+                  ({
+                    blockingDuration,
+                    duration: blockingDuration,
+                    entryType: "long-animation-frame",
+                    startTime,
+                  }) as unknown as PerformanceEntry,
+              ),
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "main_thread_stall")).toHaveLength(0);
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
   test("attributes slow interactions with Event Timing instead of click timers", async () => {
     const original = globalThis.PerformanceObserver;
     class FakePerformanceObserver {
@@ -3163,18 +3350,28 @@ describe("ambient watchdog signals", () => {
         button.setAttribute(BEACON_ATTRIBUTE.NAME, "save-deal");
         this.callback(
           {
-            getEntries: () => [
-              {
-                duration: 1240,
+            getEntries: () =>
+              [
+                {
+                  duration: 1240,
+                  interactionId: 41,
+                  processingEnd: 300,
+                  processingStart: 180,
+                  startTime: 100,
+                },
+                {
+                  duration: 1310,
+                  interactionId: 42,
+                  processingEnd: 340,
+                  processingStart: 210,
+                  startTime: 110,
+                },
+              ].map((entry) => ({
+                ...entry,
                 entryType: "event",
-                interactionId: 41,
                 name: "click",
-                processingEnd: 300,
-                processingStart: 180,
-                startTime: 100,
                 target: button,
-              } as unknown as PerformanceEntry,
-            ],
+              })) as unknown as PerformanceEntry[],
           } as PerformanceObserverEntryList,
           this as unknown as PerformanceObserver,
         );
@@ -3191,7 +3388,7 @@ describe("ambient watchdog signals", () => {
       });
       await beacon.flush();
       const events = signalsSent(sent, "slow_interaction");
-      expect(events).toHaveLength(1);
+      expect(events).toHaveLength(2);
       expect(events[0]?.message).toContain("click took 1240ms");
       expect(events[0]?.tags).toMatchObject({
         blockingDurationMs: "240",
@@ -3208,6 +3405,7 @@ describe("ambient watchdog signals", () => {
         scriptSource: "/assets/deal.js",
         target: "button[save-deal]",
       });
+      expect(events[1]?.groupingKey).toBe(events[0]?.groupingKey);
     } finally {
       globalThis.PerformanceObserver = original;
     }
@@ -3782,12 +3980,19 @@ describe("ambient watchdog signals", () => {
       }
       close(): void {}
       serverClose(): void {
-        this.dispatchEvent(new Event("close"));
+        this.dispatchEvent(
+          new CloseEvent("close", { code: 1006, wasClean: false }),
+        );
       }
     }
     const original = window.WebSocket;
     window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-    const { beacon, sent } = makeWatchdogBeacon();
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: {
+        layoutOverflowSettleMs: 0,
+        recoverableSockets: ["/sync/ws"],
+      },
+    });
     for (let index = 0; index < 4; index += 1) {
       const socket = new window.WebSocket("wss://app.test/sync/ws");
       (socket as unknown as FakeWebSocket).serverClose();
@@ -3796,6 +4001,7 @@ describe("ambient watchdog signals", () => {
     const events = signalsSent(sent, "socket_flapping");
     expect(events).toHaveLength(1);
     expect(events[0]?.tags?.endpoint).toBe("/sync/ws");
+    expect(signalsSent(sent, "socket_abnormal_close")).toHaveLength(0);
     await beacon.close();
     window.WebSocket = original;
   });
@@ -3862,6 +4068,35 @@ describe("ambient watchdog signals", () => {
       endpoint: "/sync/ws",
       wasClean: "false",
     });
+    await beacon.close();
+    window.WebSocket = original;
+  });
+
+  test("suppresses an isolated abnormal close for a recoverable socket", async () => {
+    class FakeWebSocket extends EventTarget {
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {}
+    }
+    const original = window.WebSocket;
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: {
+        layoutOverflowSettleMs: 0,
+        recoverableSockets: ["/sync/ws"],
+        socketFlapping: false,
+      },
+    });
+    const socket = new window.WebSocket("wss://app.test/sync/ws");
+    socket.dispatchEvent(
+      new CloseEvent("close", { code: 1006, wasClean: false }),
+    );
+    await beacon.flush();
+
+    expect(signalsSent(sent, "socket_abnormal_close")).toHaveLength(0);
     await beacon.close();
     window.WebSocket = original;
   });
@@ -4027,6 +4262,99 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("suppresses a transient registration failure recovered by retry", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    const registration = new EventTarget() as EventTarget & {
+      installing: ServiceWorker | null;
+    };
+    registration.installing = null;
+    let attempts = 0;
+    const container = new EventTarget() as EventTarget & {
+      register: ServiceWorkerContainer["register"];
+    };
+    container.register = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new TypeError("Script /sw.js load failed");
+      return registration as ServiceWorkerRegistration;
+    };
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: container,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: {
+          layoutOverflowSettleMs: 0,
+          serviceWorkerRecoveryMs: 10,
+        },
+      });
+      await navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      await navigator.serviceWorker.register("/sw.js");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await beacon.flush();
+      expect(signalsSent(sent, "service_worker_failure")).toHaveLength(0);
+      await beacon.close();
+    } finally {
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
+  });
+
+  test("reports a transient registration failure that does not recover", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    const container = new EventTarget() as EventTarget & {
+      register: ServiceWorkerContainer["register"];
+    };
+    container.register = async () => {
+      throw new TypeError("Script /sw.js load failed");
+    };
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: container,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: {
+          layoutOverflowSettleMs: 0,
+          serviceWorkerRecoveryMs: 5,
+        },
+      });
+      await navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await beacon.flush();
+      const events = signalsSent(sent, "service_worker_failure");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.extra?.serviceWorkerError).toMatchObject({
+        message: "Script /sw.js load failed",
+        name: "TypeError",
+      });
+      await beacon.close();
+    } finally {
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
+  });
+
   test("tolerates a service-worker register shim with no registration", async () => {
     const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
       navigator,
@@ -4130,7 +4458,7 @@ describe("ambient watchdog signals", () => {
   test("reports rapid repeated page loads as a reload loop", async () => {
     const now = Date.now();
     sessionStorage.setItem(
-      "beacon:reload-history-v2",
+      "beacon:reload-history-v4",
       JSON.stringify([
         { at: now - 3000, route: location.pathname },
         { at: now - 2000, route: location.pathname },
@@ -4141,30 +4469,170 @@ describe("ambient watchdog signals", () => {
     await beacon.flush();
     const events = signalsSent(sent, "reload_loop");
     expect(events).toHaveLength(1);
-    expect(events[0]?.tags?.loadCount).toBe("4");
-    sessionStorage.removeItem("beacon:reload-history-v2");
+    expect(events[0]?.tags).toMatchObject({
+      entryKind: "app",
+      loadCount: "4",
+      signal: "reload_loop",
+      windowMs: expect.any(String),
+    });
+    sessionStorage.removeItem("beacon:reload-history-v4");
   });
 
-  test("does not call navigation across different routes a reload loop", async () => {
+  test("starts a new streak after an intentional same-route navigation", async () => {
     const now = Date.now();
     sessionStorage.setItem(
-      "beacon:reload-history-v2",
+      "beacon:reload-history-v4",
       JSON.stringify([
-        { at: now - 3000, route: "/one" },
-        { at: now - 2000, route: "/two" },
-        { at: now - 1000, route: "/three" },
+        { at: now - 3000, route: location.pathname },
+        { at: now - 2000, route: location.pathname },
+        { at: now - 1000, route: location.pathname },
+      ]),
+    );
+    sessionStorage.setItem("beacon:navigation-intent-v1", String(now));
+    const { beacon, sent } = makeWatchdogBeacon();
+    await beacon.flush();
+    expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
+    expect(
+      JSON.parse(sessionStorage.getItem("beacon:reload-history-v4") ?? "[]"),
+    ).toEqual([{ at: expect.any(Number), route: location.pathname }]);
+    expect(sessionStorage.getItem("beacon:navigation-intent-v1")).toBeNull();
+  });
+
+  test("records a submitted form only when the document leaves", async () => {
+    const { beacon } = makeWatchdogBeacon();
+    const form = document.createElement("form");
+    document.body.append(form);
+    form.dispatchEvent(
+      new Event("submit", { bubbles: true, cancelable: true }),
+    );
+    expect(sessionStorage.getItem("beacon:navigation-intent-v1")).toBeNull();
+    window.dispatchEvent(new PageTransitionEvent("pagehide"));
+    expect(
+      Number(sessionStorage.getItem("beacon:navigation-intent-v1")),
+    ).toBeGreaterThan(0);
+    await beacon.close();
+    form.remove();
+  });
+
+  test("does not join interleaved visits into a same-route reload loop", async () => {
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-history-v4",
+      JSON.stringify([
+        { at: now - 4000, route: location.pathname },
+        { at: now - 3000, route: location.pathname },
+        { at: now - 2000, route: "/admin/people" },
+        { at: now - 1000, route: location.pathname },
       ]),
     );
     const { beacon, sent } = makeWatchdogBeacon();
     await beacon.flush();
     expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
-    sessionStorage.removeItem("beacon:reload-history-v2");
+    sessionStorage.removeItem("beacon:reload-history-v4");
+  });
+
+  test("starts a new reload streak when authentication returns from another origin", async () => {
+    const referrerDescriptor = Object.getOwnPropertyDescriptor(
+      Document.prototype,
+      "referrer",
+    );
+    Object.defineProperty(document, "referrer", {
+      configurable: true,
+      value: "https://accounts.example.com/oauth/authorize",
+    });
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-history-v4",
+      JSON.stringify([
+        { at: now - 3000, route: location.pathname },
+        { at: now - 2000, route: location.pathname },
+        { at: now - 1000, route: location.pathname },
+      ]),
+    );
+
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
+      expect(
+        JSON.parse(sessionStorage.getItem("beacon:reload-history-v4") ?? "[]"),
+      ).toEqual([{ at: expect.any(Number), route: location.pathname }]);
+    } finally {
+      Reflect.deleteProperty(document, "referrer");
+      if (referrerDescriptor !== undefined) {
+        Object.defineProperty(
+          Document.prototype,
+          "referrer",
+          referrerDescriptor,
+        );
+      }
+    }
+  });
+
+  test("starts a new reload streak after an accepted service worker update", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    Object.defineProperty(document, "referrer", {
+      configurable: true,
+      value: "about:service-worker",
+    });
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: { controller: { scriptURL: "about:service-worker" } },
+    });
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-history-v4",
+      JSON.stringify([
+        { at: now - 3000, route: location.pathname },
+        { at: now - 2000, route: location.pathname },
+        { at: now - 1000, route: location.pathname },
+      ]),
+    );
+
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
+      expect(
+        JSON.parse(sessionStorage.getItem("beacon:reload-history-v4") ?? "[]"),
+      ).toEqual([{ at: expect.any(Number), route: location.pathname }]);
+    } finally {
+      Reflect.deleteProperty(document, "referrer");
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
+  });
+
+  test("emits only once while the same reload streak continues", async () => {
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-history-v4",
+      JSON.stringify([
+        { at: now - 4000, route: location.pathname },
+        { at: now - 3000, route: location.pathname },
+        { at: now - 2000, route: location.pathname },
+        { at: now - 1000, route: location.pathname },
+      ]),
+    );
+    const { beacon, sent } = makeWatchdogBeacon();
+    await beacon.flush();
+    expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
   });
 
   test("does not collapse different entity ids into one reload-loop route", async () => {
     const now = Date.now();
     sessionStorage.setItem(
-      "beacon:reload-history-v2",
+      "beacon:reload-history-v4",
       JSON.stringify([
         {
           at: now - 3000,
@@ -4184,13 +4652,13 @@ describe("ambient watchdog signals", () => {
     await beacon.flush();
     expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
     const stored: unknown = JSON.parse(
-      sessionStorage.getItem("beacon:reload-history-v2") ?? "[]",
+      sessionStorage.getItem("beacon:reload-history-v4") ?? "[]",
     );
     expect(stored).toContainEqual({
       at: expect.any(Number),
       route: "/admin/support/11111111-1111-4111-8111-111111111111",
     });
-    sessionStorage.removeItem("beacon:reload-history-v2");
+    sessionStorage.removeItem("beacon:reload-history-v4");
   });
 
   test("reports running a build older than one already seen", async () => {
@@ -4207,13 +4675,40 @@ describe("ambient watchdog signals", () => {
     localStorage.removeItem("beacon:release-first-seen");
   });
 
-  test("reports font faces that failed to load", async () => {
+  const installFailedFont = ({
+    check = () => false,
+    load = async () => [] as FontFace[],
+    webdriver = false,
+  }: {
+    check?: () => boolean;
+    load?: () => Promise<FontFace[]>;
+    webdriver?: boolean;
+  } = {}) => {
+    const original = Object.getOwnPropertyDescriptor(document, "fonts");
+    const originalWebdriver = Object.getOwnPropertyDescriptor(
+      navigator,
+      "webdriver",
+    );
+    Object.defineProperty(navigator, "webdriver", {
+      configurable: true,
+      value: webdriver,
+    });
+    let loadCalls = 0;
     const fakeFonts = {
       addEventListener: () => undefined,
-      forEach: (
-        callback: (face: { family: string; status: string }) => void,
-      ) => {
-        callback({ family: "Material Icons", status: "error" });
+      check,
+      forEach: (callback: (face: FontFace) => void) => {
+        callback({
+          family: "Material Icons",
+          status: "error",
+          stretch: "normal",
+          style: "normal",
+          weight: "400",
+        } as FontFace);
+      },
+      load: async () => {
+        loadCalls += 1;
+        return load();
       },
       ready: Promise.resolve(),
       removeEventListener: () => undefined,
@@ -4222,14 +4717,84 @@ describe("ambient watchdog signals", () => {
       configurable: true,
       value: fakeFonts,
     });
+    return {
+      loadCalls: () => loadCalls,
+      restore: () => {
+        if (original === undefined) Reflect.deleteProperty(document, "fonts");
+        else Object.defineProperty(document, "fonts", original);
+        if (originalWebdriver === undefined) {
+          Reflect.deleteProperty(navigator, "webdriver");
+        } else {
+          Object.defineProperty(navigator, "webdriver", originalWebdriver);
+        }
+      },
+    };
+  };
+
+  const visibleMaterialIcon = (): HTMLElement => {
+    const icon = document.createElement("span");
+    icon.className = "material-icons font-failure-target";
+    icon.style.fontFamily = '"Material Icons"';
+    icon.textContent = "menu";
+    setRect(icon, rectOf(0, 24, 0, 24));
+    document.body.append(icon);
+    return icon;
+  };
+
+  test("reports a failed font that is still missing on visible content", async () => {
+    const font = installFailedFont();
+    const icon = visibleMaterialIcon();
     const { beacon, sent } = makeWatchdogBeacon();
     await new Promise((resolve) => setTimeout(resolve, 10));
     await beacon.flush();
     const events = signalsSent(sent, "font_failure");
     expect(events).toHaveLength(1);
-    expect(events[0]?.tags?.fontFamily).toBe("Material Icons");
+    expect(events[0]?.tags).toMatchObject({
+      fontFamily: "Material Icons",
+      fontStyle: "normal",
+      fontWeight: "400",
+      target: "span.material-icons.font-failure-target",
+    });
     await beacon.close();
-    Reflect.deleteProperty(document, "fonts");
+    icon.remove();
+    font.restore();
+  });
+
+  test("ignores a failed font face that no visible content uses", async () => {
+    const font = installFailedFont();
+    const { beacon, sent } = makeWatchdogBeacon();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "font_failure")).toHaveLength(0);
+    expect(font.loadCalls()).toBe(0);
+    await beacon.close();
+    font.restore();
+  });
+
+  test("ignores a failed font face that succeeds on explicit retry", async () => {
+    const font = installFailedFont({ check: () => true });
+    const icon = visibleMaterialIcon();
+    const { beacon, sent } = makeWatchdogBeacon();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "font_failure")).toHaveLength(0);
+    expect(font.loadCalls()).toBe(1);
+    await beacon.close();
+    icon.remove();
+    font.restore();
+  });
+
+  test("does not diagnose fonts inside an automated browser", async () => {
+    const font = installFailedFont({ webdriver: true });
+    const icon = visibleMaterialIcon();
+    const { beacon, sent } = makeWatchdogBeacon();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "font_failure")).toHaveLength(0);
+    expect(font.loadCalls()).toBe(0);
+    await beacon.close();
+    icon.remove();
+    font.restore();
   });
 
   test("reports a loading indicator that never resolves", async () => {
@@ -4246,6 +4811,55 @@ describe("ambient watchdog signals", () => {
     const events = signalsSent(sent, "stuck_loading");
     expect(events).toHaveLength(1);
     spinner.remove();
+  });
+
+  test("does not count a missed poll window as visible loading time", async () => {
+    const originalNow = Date.now;
+    let now = 1_000;
+    Date.now = () => now;
+    const spinner = document.createElement("div");
+    spinner.setAttribute("aria-busy", "true");
+    setRect(spinner, rectOf(0, 40, 0, 40));
+    document.body.append(spinner);
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 40 },
+      });
+      await settle(beacon);
+      now += 60_000;
+      await settle(beacon);
+
+      expect(signalsSent(sent, "stuck_loading")).toHaveLength(0);
+    } finally {
+      spinner.remove();
+      Date.now = originalNow;
+    }
+  });
+
+  test("starts a fresh deadline when a persistent control loads again", async () => {
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 40 },
+    });
+    const button = document.createElement("button");
+    button.setAttribute("aria-busy", "true");
+    setRect(button, rectOf(0, 120, 0, 40));
+    document.body.append(button);
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    button.setAttribute("aria-busy", "false");
+    await settle(beacon);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    button.setAttribute("aria-busy", "true");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await settle(beacon);
+    try {
+      expect(signalsSent(sent, "stuck_loading")).toHaveLength(0);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await settle(beacon);
+      expect(signalsSent(sent, "stuck_loading")).toHaveLength(1);
+    } finally {
+      button.remove();
+    }
   });
 
   test("reports only the outer loading boundary for nested indicators", async () => {
@@ -4361,6 +4975,61 @@ describe("ambient watchdog signals", () => {
     });
     firstWrap.remove();
     secondWrap.remove();
+  });
+
+  test("allows a positioned field action to overlap its padded input", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const field = document.createElement("div");
+    const input = document.createElement("input");
+    input.type = "password";
+    setRect(input, rectOf(100, 500, 100, 144));
+    const toggle = document.createElement("button");
+    toggle.style.position = "absolute";
+    setRect(toggle, rectOf(456, 500, 100, 144));
+    field.append(input, toggle);
+    document.body.append(field);
+
+    await settle(beacon);
+    expect(signalsSent(sent, "control_collision")).toHaveLength(0);
+    field.remove();
+  });
+
+  test("ignores overlap between a dialog control and the covered page", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const pageAction = document.createElement("button");
+    pageAction.className = "play-video";
+    setRect(pageAction, rectOf(100, 500, 100, 300));
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const privacyLink = document.createElement("a");
+    privacyLink.className = "privacy-link";
+    privacyLink.href = "/privacy-policy";
+    setRect(privacyLink, rectOf(100, 300, 282, 322));
+    dialog.append(privacyLink);
+    document.body.append(pageAction, dialog);
+
+    await settle(beacon);
+    expect(signalsSent(sent, "control_collision")).toHaveLength(0);
+    pageAction.remove();
+    dialog.remove();
+  });
+
+  test("still reports overlapping controls inside one dialog", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const first = document.createElement("button");
+    first.className = "dialog-primary";
+    setRect(first, rectOf(100, 500, 100, 150));
+    const second = document.createElement("button");
+    second.className = "dialog-secondary";
+    setRect(second, rectOf(100, 300, 144, 184));
+    dialog.append(first, second);
+    document.body.append(dialog);
+
+    await settle(beacon);
+    expect(signalsSent(sent, "control_collision")).toHaveLength(1);
+    dialog.remove();
   });
 
   test("allows touching controls inside an intentional control group", async () => {

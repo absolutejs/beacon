@@ -175,10 +175,11 @@ beacon.captureMessage("checkout started", "info");
   online state, transport, and page visibility preserved in
   `extra.networkFailures`.
 - **Runtime boundary signals** — abnormal WebSocket closes, WebSocket and SSE
-  reconnect flapping, handled service-worker registration/install failures, and
+  reconnect flapping, terminal service-worker registration/install failures, and
   dedicated/shared worker construction, runtime, and message-decoding failures
   become replay-linked warnings. Normal socket closes, page teardown, hidden-tab
-  SSE errors, and successfully replaced service workers are exempt.
+  SSE errors, transient registrations recovered during the configured grace
+  period, and successfully replaced service workers are exempt.
 - **Attributed reliability signals** — Event Timing identifies genuinely slow
   interactions and separates input delay, handler time, and presentation delay.
   Overlapping long animation frames include their worst script when the browser
