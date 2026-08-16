@@ -1385,6 +1385,32 @@ describe("auto-instrumentation", () => {
     ).toBe(false);
   });
 
+  test("drops errors whose stack is owned entirely by a browser extension", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Cannot read properties of undefined (reading 'M_ID')",
+        name: "TypeError",
+        stack:
+          "TypeError: Cannot read properties of undefined (reading 'M_ID')\n" +
+          "    at F (chrome-extension://extension-id/executors/200.js:1:761)\n" +
+          "    at X (chrome-extension://extension-id/executors/200.js:1:1442)",
+      }),
+    ).toBe(true);
+  });
+
+  test("preserves application errors with a mixed extension and app stack", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Application failed",
+        name: "Error",
+        stack:
+          "Error: Application failed\n" +
+          "    at injected (chrome-extension://extension-id/content.js:1:1)\n" +
+          "    at save (https://example.com/app.js:20:4)",
+      }),
+    ).toBe(false);
+  });
+
   test("identifies Google Web Renderer service-worker registration rejection", () => {
     expect(
       isKnownBeaconNoise({
@@ -3430,6 +3456,51 @@ describe("ambient watchdog signals", () => {
                 interactionId: 0,
                 name: "pointerout",
                 target: document.body,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { slowInteractionMs: 1000 },
+      });
+      await beacon.flush();
+      expect(signalsSent(sent, "slow_interaction")).toHaveLength(0);
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("does not open an unfixable slow-interaction issue without a target", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "event") return;
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 1208,
+                entryType: "event",
+                interactionId: 5480,
+                name: "pointerdown",
+                processingEnd: 108,
+                processingStart: 108,
+                startTime: 100,
+                target: null,
               } as unknown as PerformanceEntry,
             ],
           } as PerformanceObserverEntryList,

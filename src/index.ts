@@ -967,6 +967,19 @@ const KNOWN_CRAWLER_USER_AGENT =
   /(?:AdsBot-Google|Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|Applebot|Bytespider|PetalBot|SemrushBot|AhrefsBot|DotBot|MJ12bot|GPTBot|ClaudeBot|PerplexityBot|Google-NotebookLM|BitSightBot|Dataprovider\.com|meta-external(?:agent|ads))/i;
 const GOOGLE_WEB_RENDERER_SERVICE_WORKER_WRAPPER =
   "wrsParams.serviceWorkers.navigator.serviceWorker.register";
+const EXTENSION_STACK_PROTOCOL = /(?:chrome|moz|safari-web)-extension:\/\//u;
+const isExtensionOnlyStack = (event: Pick<BeaconEvent, "stack">): boolean => {
+  const frames = (event.stack ?? "")
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return (
+    frames.length > 0 &&
+    frames.every((frame) => EXTENSION_STACK_PROTOCOL.test(frame))
+  );
+};
 const isInjectedServiceWorkerRejection = (
   event: Pick<BeaconEvent, "message" | "stack">,
 ): boolean => {
@@ -994,6 +1007,7 @@ export const isKnownBeaconNoise = (
     matchesErrorMessage(event, FACEBOOK_IOS_HOST_INJECTION)) ||
   isInstagramIosBridgeInjection(event, userAgent) ||
   isInjectedServiceWorkerRejection(event) ||
+  isExtensionOnlyStack(event) ||
   (event.name === "Error" &&
     event.message === FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE &&
     event.tags?.errorFilename === FACEBOOK_ANDROID_PERFORMANCE_LOGGER &&
@@ -4508,6 +4522,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             entry.target instanceof Element
               ? describeElement(entry.target)
               : "unknown";
+          // A detached/removed Event Timing target leaves no product surface
+          // to diagnose. Web-vitals still retains the aggregate INP sample;
+          // do not open an unfixable issue with only browser presentation time.
+          if (target === "unknown") continue;
           const key = entry.interactionId;
           if (reported.has(key)) continue;
           reported.add(key);
