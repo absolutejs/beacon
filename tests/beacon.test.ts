@@ -3479,7 +3479,7 @@ describe("ambient watchdog signals", () => {
     }
   });
 
-  test("does not open an unfixable slow-interaction issue without a target", async () => {
+  test("drops only presentation-only slow interactions without a target", async () => {
     const original = globalThis.PerformanceObserver;
     class FakePerformanceObserver {
       private readonly callback: PerformanceObserverCallback;
@@ -3488,6 +3488,22 @@ describe("ambient watchdog signals", () => {
       }
       disconnect(): void {}
       observe(options: PerformanceObserverInit): void {
+        if (options.type === "long-animation-frame") {
+          this.callback(
+            {
+              getEntries: () => [
+                {
+                  blockingDuration: 240,
+                  duration: 400,
+                  entryType: "long-animation-frame",
+                  startTime: 2000,
+                } as unknown as PerformanceEntry,
+              ],
+            } as PerformanceObserverEntryList,
+            this as unknown as PerformanceObserver,
+          );
+          return;
+        }
         if (options.type !== "event") return;
         this.callback(
           {
@@ -3500,6 +3516,16 @@ describe("ambient watchdog signals", () => {
                 processingEnd: 108,
                 processingStart: 108,
                 startTime: 100,
+                target: null,
+              } as unknown as PerformanceEntry,
+              {
+                duration: 1200,
+                entryType: "event",
+                interactionId: 5481,
+                name: "pointerup",
+                processingEnd: 2008,
+                processingStart: 2008,
+                startTime: 2000,
                 target: null,
               } as unknown as PerformanceEntry,
             ],
@@ -3518,7 +3544,13 @@ describe("ambient watchdog signals", () => {
         signals: { slowInteractionMs: 1000 },
       });
       await beacon.flush();
-      expect(signalsSent(sent, "slow_interaction")).toHaveLength(0);
+      const events = signalsSent(sent, "slow_interaction");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        blockingDurationMs: "240",
+        interactionId: "5481",
+        target: "unknown",
+      });
     } finally {
       globalThis.PerformanceObserver = original;
     }

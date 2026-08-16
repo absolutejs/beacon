@@ -4522,10 +4522,6 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             entry.target instanceof Element
               ? describeElement(entry.target)
               : "unknown";
-          // A detached/removed Event Timing target leaves no product surface
-          // to diagnose. Web-vitals still retains the aggregate INP sample;
-          // do not open an unfixable issue with only browser presentation time.
-          if (target === "unknown") continue;
           const key = entry.interactionId;
           if (reported.has(key)) continue;
           reported.add(key);
@@ -4554,6 +4550,28 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           const hasPhaseTiming =
             typeof entry.processingStart === "number" &&
             typeof entry.processingEnd === "number";
+          const processingDurationMs = hasPhaseTiming
+            ? Math.round(
+                Math.max(0, entry.processingEnd! - entry.processingStart!),
+              )
+            : undefined;
+          const presentationDelayMs = hasPhaseTiming
+            ? Math.round(Math.max(0, interactionEnd - entry.processingEnd!))
+            : undefined;
+          // A detached/removed Event Timing target with no blocking frame and
+          // effectively no handler work leaves only browser presentation time.
+          // Web-vitals still retains the aggregate INP sample; do not promote
+          // that unfixable sample to an issue. Preserve targetless entries when
+          // a blocking frame or meaningful application processing remains.
+          if (
+            target === "unknown" &&
+            overlappingFrame === undefined &&
+            processingDurationMs !== undefined &&
+            processingDurationMs <= 16 &&
+            presentationDelayMs !== undefined &&
+            presentationDelayMs >= minimum
+          )
+            continue;
           emitSignal(
             `Slow interaction — ${entry.name} took ${Math.round(entry.duration)}ms — ${shortUrl(location.href)}`,
             {
@@ -4564,19 +4582,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                         Math.max(0, entry.processingStart! - entry.startTime),
                       ),
                     ),
-                    presentationDelayMs: String(
-                      Math.round(
-                        Math.max(0, interactionEnd - entry.processingEnd!),
-                      ),
-                    ),
-                    processingDurationMs: String(
-                      Math.round(
-                        Math.max(
-                          0,
-                          entry.processingEnd! - entry.processingStart!,
-                        ),
-                      ),
-                    ),
+                    presentationDelayMs: String(presentationDelayMs),
+                    processingDurationMs: String(processingDurationMs),
                   }
                 : { phaseAttribution: "unavailable" }),
               ...(overlappingFrame === undefined
