@@ -3796,6 +3796,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           top === control ||
           control.contains(top) ||
           top.contains(control) ||
+          // A non-modal dialog/popover intentionally paints across the page
+          // beneath it. Controls remain actionable inside that surface; the
+          // covered page is not evidence that either side is broken.
+          crossesDialogBoundary(control, top) ||
           // Browser extensions may inject their own UI above the document.
           // The application cannot repair or safely attribute that occlusion.
           isExtensionOwnedCover(top)

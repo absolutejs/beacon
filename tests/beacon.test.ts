@@ -5023,6 +5023,47 @@ describe("ambient watchdog signals", () => {
     document.elementFromPoint = originalFromPoint;
   });
 
+  test("ignores page coverage across a non-modal dialog boundary", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const pageAction = document.createElement("button");
+    pageAction.className = "invite-member";
+    setRect(pageAction, rectOf(100, 300, 100, 144));
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.className = "account-menu";
+    setRect(dialog, rectOf(80, 320, 80, 300));
+    document.body.append(pageAction, dialog);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => dialog;
+    await settle(beacon);
+    expect(signalsSent(sent, "occluded_control")).toHaveLength(0);
+    pageAction.remove();
+    dialog.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
+  test("still reports a control covered inside one dialog", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const action = document.createElement("button");
+    action.className = "dialog-action";
+    setRect(action, rectOf(100, 300, 100, 144));
+    const leakedCover = document.createElement("div");
+    leakedCover.className = "dialog-cover";
+    setRect(leakedCover, rectOf(100, 300, 100, 144));
+    dialog.append(action, leakedCover);
+    document.body.append(dialog);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => leakedCover;
+    await settle(beacon);
+    expect(signalsSent(sent, "occluded_control")).toHaveLength(1);
+    dialog.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
   test("reports controls from separate layout groups that touch", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const primaryRow = document.createElement("div");
