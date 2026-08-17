@@ -2576,7 +2576,7 @@ describe("ambient watchdog signals", () => {
       createBeacon({
         instrument: ALL_OFF,
         project: "web",
-        signals: { layoutOverflowSettleMs: 0 },
+        signals: { fontFailureConfirmMs: 0, layoutOverflowSettleMs: 0 },
         transport: ({ body }) => {
           sent.push(JSON.parse(body) as BeaconEnvelope);
         },
@@ -4895,6 +4895,37 @@ describe("ambient watchdog signals", () => {
     await beacon.flush();
     expect(signalsSent(sent, "font_failure")).toHaveLength(0);
     expect(font.loadCalls()).toBe(0);
+    await beacon.close();
+    icon.remove();
+    font.restore();
+  });
+
+  test("does not diagnose a short-lived scan that conceals webdriver", async () => {
+    const font = installFailedFont({ webdriver: false });
+    const icon = visibleMaterialIcon();
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { fontFailureConfirmMs: 100, layoutOverflowSettleMs: 0 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    icon.remove();
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    await beacon.flush();
+    expect(signalsSent(sent, "font_failure")).toHaveLength(0);
+    expect(font.loadCalls()).toBe(1);
+    await beacon.close();
+    font.restore();
+  });
+
+  test("confirms a persistent visible font failure with a second retry", async () => {
+    const font = installFailedFont({ webdriver: false });
+    const icon = visibleMaterialIcon();
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { fontFailureConfirmMs: 20, layoutOverflowSettleMs: 0 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await beacon.flush();
+    expect(signalsSent(sent, "font_failure")).toHaveLength(1);
+    expect(font.loadCalls()).toBe(2);
     await beacon.close();
     icon.remove();
     font.restore();

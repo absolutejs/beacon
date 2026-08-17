@@ -287,6 +287,9 @@ export type BeaconSignals = {
   /** `FontFace` loads that end in `status: "error"` — icon fonts falling back
    *  to raw ligature text, custom faces silently missing. Default true. */
   fontFailures?: boolean;
+  /** Time a visible failed face must remain unavailable before it is reported.
+   * The face is retried at both ends of the window. Default 5000ms. */
+  fontFailureConfirmMs?: number;
   /** The same form submitted or failing native validation repeatedly within a
    *  minute — the quiet sibling of a rage click. Default true. */
   formFrustration?: boolean;
@@ -1593,6 +1596,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const EMBEDDED_CONTENT_STALL_DEFAULT_MS = 15000;
   const WEBGL_RESTORE_GRACE_DEFAULT_MS = 2000;
   const FOCUSED_CONTROL_SETTLE_DEFAULT_MS = 500;
+  const FONT_FAILURE_CONFIRM_DEFAULT_MS = 5000;
   const KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX = 0.8;
   const SCROLL_JAIL_EVENT_COUNT = 8;
   const SCROLL_JAIL_WINDOW_MS = 2000;
@@ -6370,6 +6374,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   ) {
     const reportedFonts = new Set<string>();
     const checkingFonts = new Set<string>();
+    const confirmationMs = Math.max(
+      0,
+      signals.fontFailureConfirmMs ?? FONT_FAILURE_CONFIRM_DEFAULT_MS,
+    );
     const normalizedFamily = (family: string): string =>
       family
         .trim()
@@ -6430,17 +6438,34 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const element = affectedElement(face.family);
       if (element === null) return;
       checkingFonts.add(key);
-      const sample = element.textContent?.trim().slice(0, 64) || "BESbswy";
-      const font = `${face.style} ${face.weight} ${face.stretch} 16px ${JSON.stringify(face.family)}`;
+      const fontAvailable = async (consumer: HTMLElement): Promise<boolean> => {
+        const sample = consumer.textContent?.trim().slice(0, 64) || "BESbswy";
+        const font = `${face.style} ${face.weight} ${face.stretch} 16px ${JSON.stringify(face.family)}`;
+        try {
+          await document.fonts.load(font, sample);
+          return document.fonts.check(font, sample);
+        } catch {
+          return false;
+        }
+      };
       try {
-        await document.fonts.load(font, sample);
-        if (document.fonts.check(font, sample)) return;
-      } catch {
-        // A rejected explicit load is itself confirmation of the failure.
+        if (await fontAvailable(element)) return;
+        if (confirmationMs > 0) {
+          await new Promise<void>((resolve) => {
+            const timer = window.setTimeout(resolve, confirmationMs);
+            cleanups.push(() => window.clearTimeout(timer));
+          });
+          if (document.visibilityState === "hidden") return;
+          const confirmedElement = affectedElement(face.family);
+          if (confirmedElement === null) return;
+          if (await fontAvailable(confirmedElement)) return;
+          reportFontFailure(face, confirmedElement, key);
+          return;
+        }
+        reportFontFailure(face, element, key);
       } finally {
         checkingFonts.delete(key);
       }
-      reportFontFailure(face, element, key);
     };
     const sweepFonts = (): void => {
       document.fonts.forEach((face) => {
