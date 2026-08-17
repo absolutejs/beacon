@@ -1726,6 +1726,73 @@ describe("auto-instrumentation", () => {
     }
   });
 
+  test("opt-in classifies selected 4xx fetch responses", async () => {
+    const originalFetch = window.fetch;
+    const traceId = "fedcba9876543210fedcba9876543210";
+    window.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          errorCode: "E_INVALID_SUBMISSION",
+          message: "The provided data is invalid.",
+        }),
+        {
+          headers: {
+            [BEACON_TRACE_HEADER]: traceId,
+            "content-type": "application/json",
+          },
+          status: 422,
+        },
+      )) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: {
+          ...ALL_OFF,
+          classifyErrorResponse: async (response, request) => {
+            if (!request.url.includes("/payments")) return false;
+            const body = (await response.json()) as { errorCode?: string };
+            return body.errorCode === "E_INVALID_SUBMISSION"
+              ? {
+                  groupingKey: "payments:provider-contract",
+                  level: "error",
+                  message: "Payment provider rejected the request contract",
+                  tags: { providerCode: body.errorCode },
+                }
+              : false;
+          },
+          fetch: true,
+        },
+        project: "web",
+        signals: false,
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    try {
+      await window.fetch("/v1/payments/subscriptions", { method: "POST" });
+      await tick();
+      await beacon.flush();
+      expect(sent[0]?.events[0]).toMatchObject({
+        groupingKey: "payments:provider-contract",
+        level: "error",
+        message: "Payment provider rejected the request contract",
+        name: "HttpResponseFailure",
+        tags: {
+          endpoint: "/v1/payments/subscriptions",
+          method: "POST",
+          providerCode: "E_INVALID_SUBMISSION",
+          signal: "http_response_failure",
+          status: "422",
+        },
+        traceId,
+      });
+    } finally {
+      await beacon.close();
+      window.fetch = originalFetch;
+    }
+  });
+
   test("correlates fetch 5xx signals with the server trace", async () => {
     const originalFetch = globalThis.fetch;
     const traceId = "0123456789abcdef0123456789abcdef";

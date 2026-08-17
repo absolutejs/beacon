@@ -186,7 +186,10 @@ beacon.captureMessage("checkout started", "info");
   exposes it; missing browser attribution is labeled explicitly. Layout
   Instability names shifted elements. Successful HTTP responses can be
   classified through the host-owned `instrument.classifyResponse` callback for
-  GraphQL-style errors without Beacon retaining response bodies.
+  GraphQL-style errors. Selected HTTP 4xx/5xx responses can be promoted through
+  the opt-in `instrument.classifyErrorResponse` callback when application context
+  proves they are internal contract failures. Beacon never retains response
+  bodies.
 - **Lifecycle and platform gaps** — marked empty application roots, marked dirty
   forms abandoned during navigation, marked media errors/stalls, Web Storage and
   IndexedDB failures, discarded documents, bfcache rejection reasons, slow
@@ -216,6 +219,7 @@ close() => Promise<void>          // remove listeners + final flush
 BEACON_SIGNAL.FETCH_FAILED
 BEACON_SIGNAL.SLOW_RESPONSE
 BEACON_SIGNAL.HTTP_5XX
+BEACON_SIGNAL.HTTP_RESPONSE_FAILURE
 BEACON_TRACE_HEADER // "x-absolute-trace-id"
 
 // Global helpers (no-op until initBeacon): captureException, captureMessage,

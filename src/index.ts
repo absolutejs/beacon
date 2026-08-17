@@ -44,6 +44,7 @@ export const BEACON_SIGNAL = {
   FORM_ABANDONMENT: "form_abandonment",
   FOCUSED_CONTROL_OFFSCREEN: "focused_control_offscreen",
   HTTP_5XX: "http_5xx",
+  HTTP_RESPONSE_FAILURE: "http_response_failure",
   INVISIBLE_TEXT: "invisible_text",
   EMBEDDED_CONTENT_STALLED: "embedded_content_stalled",
   LAYOUT_OVERFLOW: "layout_overflow",
@@ -168,6 +169,22 @@ export type BeaconTransport = (request: {
   useBeacon: boolean;
 }) => void | Promise<void>;
 
+export type BeaconResponseClassification = {
+  groupingKey: string;
+  level?: BeaconLevel;
+  message: string;
+  tags?: Record<string, string>;
+};
+
+export type BeaconResponseClassifier = (
+  response: Response,
+  request: { method: string; url: string },
+) =>
+  | void
+  | false
+  | BeaconResponseClassification
+  | Promise<void | false | BeaconResponseClassification>;
+
 export type BeaconInstrumentation = {
   /** `window.onerror` / `error` events. Default true. */
   globalErrors?: boolean;
@@ -198,22 +215,12 @@ export type BeaconInstrumentation = {
   /** Privacy-owned application classifier for successful HTTP responses that
    * encode a semantic failure (for example GraphQL errors in an HTTP 200).
    * Beacon never reads or stores the response body itself. */
-  classifyResponse?: (
-    response: Response,
-    request: { method: string; url: string },
-  ) =>
-    | void
-    | false
-    | { groupingKey: string; message: string; tags?: Record<string, string> }
-    | Promise<
-        | void
-        | false
-        | {
-            groupingKey: string;
-            message: string;
-            tags?: Record<string, string>;
-          }
-      >;
+  classifyResponse?: BeaconResponseClassifier;
+  /** Opt-in classifier for HTTP responses with status >= 400. Use this when
+   * application context can distinguish an internal contract failure carried
+   * as 4xx from an expected user/input rejection. Ordinary 4xx responses stay
+   * silent by default, and Beacon never reads or stores the body itself. */
+  classifyErrorResponse?: BeaconResponseClassifier;
 };
 
 export type BeaconResourceFailure = {
@@ -6519,26 +6526,39 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     });
   }
 
-  const classifySemanticResponse = (
+  const classifyInstrumentedResponse = (
     response: Response,
     request: { method: string; url: string },
   ): void => {
-    const classifier = instrument.classifyResponse;
-    if (classifier === undefined || !response.ok) return;
+    const errorResponse = response.status >= 400;
+    const classifier = errorResponse
+      ? instrument.classifyErrorResponse
+      : response.ok
+        ? instrument.classifyResponse
+        : undefined;
+    if (classifier === undefined) return;
+    const traceId = responseTraceId(response.headers.get(BEACON_TRACE_HEADER));
     void Promise.resolve(classifier(response.clone(), request))
       .then((result) => {
         if (result === undefined || result === false) return;
         captureException(
-          errorWithoutStack("SemanticResponseFailure", result.message),
+          errorWithoutStack(
+            errorResponse ? "HttpResponseFailure" : "SemanticResponseFailure",
+            result.message,
+          ),
           {
             groupingKey: result.groupingKey,
-            level: "warning",
+            level: result.level ?? "warning",
             tags: {
               endpoint: shortUrl(request.url),
               method: request.method.toUpperCase(),
-              signal: BEACON_SIGNAL.SEMANTIC_RESPONSE_FAILURE,
+              signal: errorResponse
+                ? BEACON_SIGNAL.HTTP_RESPONSE_FAILURE
+                : BEACON_SIGNAL.SEMANTIC_RESPONSE_FAILURE,
+              status: String(response.status),
               ...(result.tags ?? {}),
             },
+            ...(traceId === undefined ? {} : { traceId }),
           },
         );
       })
@@ -6580,7 +6600,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           Date.now() - start,
           responseTraceId(response.headers.get(BEACON_TRACE_HEADER)),
         );
-        classifySemanticResponse(response, { method, url });
+        classifyInstrumentedResponse(response, { method, url });
         return response;
       } catch (error) {
         const resolved = toError(error);
@@ -6673,9 +6693,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                 responseTraceId(this.getResponseHeader(BEACON_TRACE_HEADER)),
               );
               if (
-                instrument.classifyResponse !== undefined &&
-                this.status >= 200 &&
-                this.status < 300 &&
+                ((instrument.classifyResponse !== undefined &&
+                  this.status >= 200 &&
+                  this.status < 300) ||
+                  (instrument.classifyErrorResponse !== undefined &&
+                    this.status >= 400)) &&
                 (this.responseType === "" || this.responseType === "text")
               ) {
                 const headers = new Headers();
@@ -6689,7 +6711,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                     line.slice(separator + 1).trim(),
                   );
                 }
-                classifySemanticResponse(
+                classifyInstrumentedResponse(
                   new Response(this.responseText, {
                     headers,
                     status: this.status,
