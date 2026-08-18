@@ -3582,6 +3582,51 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("ignores input-delay-only browser scheduling artifacts", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "event") return;
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 17_752,
+                entryType: "event",
+                interactionId: 4101,
+                name: "keyup",
+                processingEnd: 17_807,
+                processingStart: 17_807,
+                startTime: 100,
+                target: document.createElement("input"),
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { slowInteractionMs: 1000 },
+      });
+      await beacon.flush();
+      expect(signalsSent(sent, "slow_interaction")).toHaveLength(0);
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
   test("drops only presentation-only slow interactions without a target", async () => {
     const original = globalThis.PerformanceObserver;
     class FakePerformanceObserver {

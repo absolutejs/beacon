@@ -4584,6 +4584,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           const presentationDelayMs = hasPhaseTiming
             ? Math.round(Math.max(0, interactionEnd - entry.processingEnd!))
             : undefined;
+          const inputDelayMs = hasPhaseTiming
+            ? Math.round(Math.max(0, entry.processingStart! - entry.startTime))
+            : undefined;
           // A detached/removed Event Timing target with no blocking frame and
           // effectively no handler work leaves only browser presentation time.
           // Web-vitals still retains the aggregate INP sample; do not promote
@@ -4598,16 +4601,29 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             presentationDelayMs >= minimum
           )
             continue;
+          // When the browser reports a very large input delay but the handler
+          // and presentation are both fast, an active LoAF/long-task observer
+          // should identify any application work that actually blocked it.
+          // With no overlapping frame, this is a tab thaw/browser scheduling
+          // artifact rather than actionable application latency. Keep the
+          // aggregate INP sample, but do not open an issue for it.
+          if (
+            blockingObserver !== undefined &&
+            overlappingFrame === undefined &&
+            inputDelayMs !== undefined &&
+            inputDelayMs >= minimum &&
+            processingDurationMs !== undefined &&
+            processingDurationMs <= 16 &&
+            presentationDelayMs !== undefined &&
+            presentationDelayMs < minimum
+          )
+            continue;
           emitSignal(
             `Slow interaction — ${entry.name} took ${Math.round(entry.duration)}ms — ${shortUrl(location.href)}`,
             {
               ...(hasPhaseTiming
                 ? {
-                    inputDelayMs: String(
-                      Math.round(
-                        Math.max(0, entry.processingStart! - entry.startTime),
-                      ),
-                    ),
+                    inputDelayMs: String(inputDelayMs),
                     presentationDelayMs: String(presentationDelayMs),
                     processingDurationMs: String(processingDurationMs),
                   }
