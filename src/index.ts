@@ -974,7 +974,7 @@ const FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE =
 const FACEBOOK_ANDROID_PERFORMANCE_LOGGER =
   "iabjs://navigation_performance_logger_android";
 const KNOWN_CRAWLER_USER_AGENT =
-  /(?:AdsBot-Google|Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|Applebot|Bytespider|PetalBot|SemrushBot|AhrefsBot|DotBot|MJ12bot|GPTBot|ClaudeBot|PerplexityBot|Google-NotebookLM|BitSightBot|Dataprovider\.com|meta-external(?:agent|ads))/i;
+  /(?:AdsBot-Google|Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|Applebot|Bytespider|PetalBot|SemrushBot|AhrefsBot|DotBot|MJ12bot|GPTBot|ClaudeBot|PerplexityBot|Google-NotebookLM|BitSightBot|Dataprovider\.com|HubSpot Crawler|meta-external(?:agent|ads))/i;
 const GOOGLE_WEB_RENDERER_SERVICE_WORKER_WRAPPER =
   "wrsParams.serviceWorkers.navigator.serviceWorker.register";
 const EXTENSION_STACK_PROTOCOL = /(?:chrome|moz|safari-web)-extension:\/\//u;
@@ -1195,6 +1195,7 @@ const UUID_PATH_SEGMENT =
 const LONG_IDENTIFIER_SEGMENT = /\b(?:[0-9a-f]{16,}|\d{8,})\b/giu;
 const VOLATILE_SIGNAL_TAGS = new Set([
   "actionId",
+  "attemptCount",
   "blockingDurationMs",
   "blockingFrameDurationMs",
   "blockerLocations",
@@ -1211,6 +1212,7 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "obscuredPx",
   "presentationDelayMs",
   "processingDurationMs",
+  "reportDelayMs",
   "responseMs",
   "shiftValue",
   "signal",
@@ -2262,17 +2264,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     for (const [kind, failures] of groups) {
       const newestFailureAt = Math.max(...failures.map(({ at }) => at));
       const reportDelayMs = Math.max(0, Date.now() - newestFailureAt);
-      const endpoints = [...new Set(failures.map(({ endpoint }) => endpoint))];
-      const methods = [...new Set(failures.map(({ method }) => method))];
+      const endpoints = [
+        ...new Set(failures.map(({ endpoint }) => endpoint)),
+      ].sort();
+      const methods = [...new Set(failures.map(({ method }) => method))].sort();
       const onlineStates = [
         ...new Set(failures.map(({ online }) => String(online))),
-      ];
+      ].sort();
       const transports = [
         ...new Set(failures.map(({ transport }) => transport)),
-      ];
+      ].sort();
       const visibilityStates = [
         ...new Set(failures.map(({ visibilityState }) => visibilityState)),
-      ];
+      ].sort();
       const suspendedBackgroundTransport =
         kind === "transport" &&
         failures.every(({ visibilityState }) => visibilityState === "hidden") &&
@@ -3330,6 +3334,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     ): boolean => {
       let current: Element | null = element;
       while (current !== null) {
+        if (
+          current instanceof HTMLDetailsElement &&
+          !current.open &&
+          current.querySelector(":scope > summary")?.contains(element) !== true
+        ) {
+          return true;
+        }
         if (
           current.hasAttribute("hidden") ||
           current.hasAttribute("inert") ||

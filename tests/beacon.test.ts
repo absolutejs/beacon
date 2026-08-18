@@ -1467,6 +1467,7 @@ describe("auto-instrumentation", () => {
     "Mozilla/5.0 (compatible; BitSightBot/1.0)",
     "Mozilla/5.0 Dataprovider.com",
     "Mozilla/5.0 Google-NotebookLM",
+    "Mozilla/5.0 (compatible; HubSpot Crawler; +https://www.hubspot.com/)",
     "Mozilla/5.0 (compatible; meta-externalagent/1.1; +https://developers.facebook.com/docs/sharing/webmasters/crawler)",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 13_2_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.3 Mobile/15E148 Safari/604.1 (compatible; meta-externalads/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))",
   ])("drops crawler and scanner traffic: %s", (userAgent) => {
@@ -2011,7 +2012,7 @@ describe("auto-instrumentation", () => {
       tags: {
         attemptCount: "2",
         endpointCount: "2",
-        endpoints: "/v1/support/list,/v1/notifications",
+        endpoints: "/v1/notifications,/v1/support/list",
         failureKind: "transport",
         method: "GET",
         reportDelayMs: expect.any(String),
@@ -2024,6 +2025,41 @@ describe("auto-instrumentation", () => {
       expect.objectContaining({ endpoint: "/v1/notifications" }),
     ]);
     globalThis.fetch = originalFetch;
+  });
+
+  test("uses stable identity for connectivity interruptions", async () => {
+    const originalFetch = globalThis.fetch;
+    const capture = async (paths: string[]) => {
+      globalThis.fetch = (async () => {
+        throw new TypeError("Failed to fetch");
+      }) as unknown as typeof fetch;
+      const sent: BeaconEnvelope[] = [];
+      const beacon = track(
+        createBeacon({
+          instrument: { ...ALL_OFF, fetch: true },
+          project: "web",
+          signals: { failedRequests: true },
+          transport: ({ body }) => {
+            sent.push(JSON.parse(body) as BeaconEnvelope);
+          },
+        }),
+      );
+      await Promise.allSettled(paths.map((path) => fetch(path)));
+      await beacon.flush();
+
+      return sent[0]?.events[0];
+    };
+
+    try {
+      const first = await capture(["/v1/support/list", "/v1/notifications"]);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = await capture(["/v1/notifications", "/v1/support/list"]);
+      expect(first?.tags?.endpoints).toBe("/v1/notifications,/v1/support/list");
+      expect(second?.tags?.endpoints).toBe(first?.tags?.endpoints);
+      expect(second?.groupingKey).toBe(first?.groupingKey);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("keeps a suspended hidden-tab transport burst as breadcrumb-only context", async () => {
@@ -5387,6 +5423,28 @@ describe("ambient watchdog signals", () => {
     expect(signalsSent(sent, "occluded_control")).toHaveLength(0);
     hiddenDialog.remove();
     cover.remove();
+    await beacon.close();
+    document.elementFromPoint = originalFromPoint;
+  });
+
+  test("does not scan controls inside closed details", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Filters";
+    const input = document.createElement("input");
+    setRect(input, rectOf(100, 300, 100, 144));
+    details.append(summary, input);
+    const loading = document.createElement("p");
+    loading.className = "loading-state";
+    setRect(loading, rectOf(100, 300, 100, 144));
+    document.body.append(details, loading);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => loading;
+    await settle(beacon);
+    expect(signalsSent(sent, "occluded_control")).toHaveLength(0);
+    details.remove();
+    loading.remove();
     await beacon.close();
     document.elementFromPoint = originalFromPoint;
   });
