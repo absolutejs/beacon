@@ -12,6 +12,7 @@ import type {
   BeaconEvent as IngestEvent,
 } from "@absolutejs/errors/ingest";
 import {
+  BEACON_SDK_VERSION,
   BEACON_SIGNAL,
   type BeaconEnvelope,
   type BeaconEvent,
@@ -43,4 +44,11 @@ void driftedSignalIsRejected;
 
 test("beacon envelope is contract-locked to /ingest (compile-time)", () => {
   expect(true).toBe(true);
+});
+
+test("embedded SDK version matches the published package version", async () => {
+  const packageJson = (await Bun.file(
+    new URL("../package.json", import.meta.url),
+  ).json()) as { version: string };
+  expect(BEACON_SDK_VERSION).toBe(packageJson.version);
 });

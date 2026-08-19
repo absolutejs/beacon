@@ -39,6 +39,12 @@ initBeacon({
   endpoint: "https://api.example.com/ingest",
   release: import.meta.env.VITE_RELEASE,
   environment: "production",
+  // Optional: detect a tab that stayed open across a deployment. The endpoint
+  // may return either `{ commit: "..." }` or `{ release: "..." }`.
+  releaseProbe: {
+    endpoint: "/version",
+    onStale: () => window.location.reload(),
+  },
 });
 
 // Uncaught errors + unhandled rejections are captured automatically.
@@ -143,6 +149,12 @@ beacon.captureMessage("checkout started", "info");
   Reload loops require repeated loads of the same normalized route; ordinary
   navigation across several pages does not qualify. Occlusion scans exclude
   hidden, inert, transparent, and pointer-disabled control subtrees.
+  Applications can also configure `releaseProbe` to compare a long-lived page's
+  embedded release with a same-origin server endpoint. After a mismatch Beacon
+  reports one `stale_release`, suppresses synthetic issue signals from the
+  obsolete detector bundle, and invokes `onStale` after flushing. Every event
+  carries `sdkVersion` and `pageStartedAt` in `extra` for collector-side stale
+  evidence policy.
 - **Theme and loading contracts** — mark an application boundary with
   `data-beacon-theme="adaptive"` to report large opaque surfaces whose
   luminance polarity contradicts the active light/dark mode. Interactive

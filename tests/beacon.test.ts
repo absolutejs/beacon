@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { computeFingerprint } from "@absolutejs/errors";
 import {
   BEACON_ATTRIBUTE,
+  BEACON_SDK_VERSION,
   BEACON_TRACE_HEADER,
   createBeacon,
   isKnownBeaconNoise,
@@ -82,6 +83,8 @@ describe("capture + transport", () => {
     expect(typeof event.at).toBe("number");
     expect(typeof event.stack).toBe("string");
     expect(typeof event.extra?.sessionId).toBe("string");
+    expect(event.extra?.sdkVersion).toBe(BEACON_SDK_VERSION);
+    expect(event.extra?.pageStartedAt).toBeNumber();
   });
 
   test("captureException preserves trace and span correlation", async () => {
@@ -4924,6 +4927,48 @@ describe("ambient watchdog signals", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.tags?.newestRelease).toBe("v2");
     localStorage.removeItem("beacon:release-first-seen");
+  });
+
+  test("probes the serving release and suppresses obsolete synthetic signals", async () => {
+    const originalFetch = window.fetch;
+    const stale: Array<{ currentRelease: string; newestRelease: string }> = [];
+    window.fetch = (async (input) => {
+      const url = String(input);
+      if (url.includes("/version")) {
+        return new Response(JSON.stringify({ commit: "v2" }), {
+          headers: { "content-type": "application/json" },
+          status: 200,
+        });
+      }
+      return new Response("failed", { status: 500 });
+    }) as typeof window.fetch;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        release: "v1",
+        releaseProbe: {
+          endpoint: "https://app.test/version",
+          onStale: (input) => stale.push(input),
+        },
+      });
+      await tick();
+      await tick();
+      await window.fetch("/api/failing");
+      await beacon.flush();
+
+      const events = signalsSent(sent, "stale_release");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        currentRelease: "v1",
+        newestRelease: "v2",
+        staleDetection: "release-probe",
+      });
+      expect(signalsSent(sent, "server_error")).toHaveLength(0);
+      expect(stale).toEqual([{ currentRelease: "v1", newestRelease: "v2" }]);
+      await beacon.close();
+    } finally {
+      window.fetch = originalFetch;
+    }
   });
 
   const installFailedFont = ({

@@ -109,6 +109,9 @@ export const BEACON_ATTRIBUTE = {
 /** Response header used to correlate a browser signal with its server request. */
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
+/** Beacon package version retained with every captured event. */
+export const BEACON_SDK_VERSION = "0.6.49";
+
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
   signal?: BeaconSignal;
@@ -460,6 +463,15 @@ export type BeaconSignals = {
   thrashedCursorReversals?: number;
 };
 
+export type BeaconReleaseProbe = {
+  /** Same-origin endpoint returning `{ commit }` or `{ release }`. */
+  endpoint: string;
+  /** Visible-page polling interval. Default 60000ms. */
+  intervalMs?: number;
+  /** Called after the stale-release event has been flushed. */
+  onStale?: (input: { currentRelease: string; newestRelease: string }) => void;
+};
+
 export type BeaconNetworkFailure = {
   at: number;
   durationMs: number;
@@ -488,6 +500,10 @@ export type BeaconOptions = {
   /** Ingest endpoint URL. Default `/ingest`. */
   endpoint?: string;
   release?: string;
+  /** Compare this page's embedded release with the currently served release.
+   * Once they differ, Beacon emits one stale-release event and suppresses
+   * ambient issue signals from the obsolete page. */
+  releaseProbe?: BeaconReleaseProbe;
   environment?: string;
   /** Auth key, sent as `x-beacon-key` (forces `fetch` over `sendBeacon`). */
   key?: string;
@@ -1544,6 +1560,7 @@ const defaultTransport: BeaconTransport = ({ url, body, key, useBeacon }) => {
 export const createBeacon = (options: BeaconOptions): Beacon => {
   if (!inBrowser()) return noopBeacon; // SSR / non-DOM import is a no-op
 
+  const pageStartedAt = Date.now();
   const endpoint = options.endpoint ?? "/ingest";
   const maxBatch = options.maxBatch ?? 30;
   const flushIntervalMs = options.flushIntervalMs ?? 5000;
@@ -1554,6 +1571,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const transport = options.transport ?? defaultTransport;
   const instrument = options.instrument ?? {};
   const sessionId = newId();
+  const releaseProbeFetch =
+    options.releaseProbe !== undefined && typeof window.fetch === "function"
+      ? window.fetch.bind(window)
+      : undefined;
+  let staleClientRelease = false;
 
   // Signal detection (off unless `signals` is set). `true` ⇒ all defaults.
   const signals: BeaconSignals | null =
@@ -1913,7 +1935,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       ...event.tags,
     };
     if (Object.keys(mergedTags).length > 0) enriched.tags = mergedTags;
-    const extra: Record<string, unknown> = { sessionId, ...event.extra };
+    const extra: Record<string, unknown> = {
+      ...event.extra,
+      pageStartedAt,
+      sdkVersion: BEACON_SDK_VERSION,
+      sessionId,
+    };
     if (breadcrumbs.length > 0) extra.breadcrumbs = [...breadcrumbs];
     if (user !== undefined) extra.user = user;
     enriched.extra = extra;
@@ -1988,6 +2015,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     fallbackFramesToDrop = 1,
     useDefaultFingerprint = false,
   ): void => {
+    if (staleClientRelease && signalTags.signal !== BEACON_SIGNAL.STALE_RELEASE)
+      return;
     const error = new Error(message);
     const captureStackTrace = (
       Error as ErrorConstructor & {
@@ -2023,6 +2052,110 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       ...(extra !== undefined ? { extra } : {}),
     });
   };
+
+  // A tab can remain open across many deployments without ever observing a
+  // newer release in localStorage. An opt-in server probe closes that gap.
+  // Once the serving release differs, diagnostics produced by this obsolete
+  // bundle are not trustworthy: retain real thrown errors, but stop synthetic
+  // issue signals and report the stale page exactly once.
+  if (
+    options.releaseProbe !== undefined &&
+    releaseProbeFetch !== undefined &&
+    typeof options.release === "string" &&
+    options.release !== ""
+  ) {
+    const probe = options.releaseProbe;
+    const embeddedRelease = options.release;
+    let probeUrl: URL | undefined;
+    try {
+      probeUrl = new URL(probe.endpoint, location.href);
+    } catch {
+      // A malformed endpoint (or a synthetic about:blank document) disables
+      // the optional probe without affecting capture.
+    }
+    if (
+      probeUrl !== undefined &&
+      (location.origin === "null" || probeUrl.origin === location.origin)
+    ) {
+      let checking = false;
+      let reported = false;
+      const checkServingRelease = async (): Promise<void> => {
+        if (checking || staleClientRelease) return;
+        checking = true;
+        try {
+          const response = await releaseProbeFetch(probeUrl.href, {
+            cache: "no-store",
+            credentials: "same-origin",
+          });
+          if (!response.ok) return;
+          const body: unknown = await response.json();
+          if (body === null || typeof body !== "object") return;
+          const candidate =
+            "commit" in body && typeof body.commit === "string"
+              ? body.commit
+              : "release" in body && typeof body.release === "string"
+                ? body.release
+                : undefined;
+          if (
+            candidate === undefined ||
+            candidate === "" ||
+            candidate === embeddedRelease
+          )
+            return;
+
+          staleClientRelease = true;
+          // Remove synthetic findings buffered before the asynchronous probe
+          // completed. They came from the same obsolete detector bundle.
+          for (let index = buffer.length - 1; index >= 0; index -= 1) {
+            if (buffer[index]?.tags?.signal !== undefined) {
+              buffer.splice(index, 1);
+            }
+          }
+          if (reported) return;
+          reported = true;
+          emitSignal(
+            `Stale release — this page is running an older build than the server — ${shortUrl(location.href)}`,
+            {
+              currentRelease: embeddedRelease,
+              newestRelease: candidate,
+              signal: BEACON_SIGNAL.STALE_RELEASE,
+              staleDetection: "release-probe",
+            },
+          );
+          await flush(true);
+          probe.onStale?.({
+            currentRelease: embeddedRelease,
+            newestRelease: candidate,
+          });
+        } catch {
+          // Release freshness is recovery infrastructure. Offline and malformed
+          // responses leave the usable page alone until the next check.
+        } finally {
+          checking = false;
+        }
+      };
+      const checkWhenVisible = (): void => {
+        if (document.visibilityState === "visible") {
+          void checkServingRelease();
+        }
+      };
+      const interval = window.setInterval(
+        checkWhenVisible,
+        Math.max(1000, probe.intervalMs ?? 60000),
+      );
+      const onVisibilityChange = (): void => checkWhenVisible();
+      window.addEventListener("focus", checkWhenVisible);
+      window.addEventListener("online", checkWhenVisible);
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      cleanups.push(() => {
+        window.clearInterval(interval);
+        window.removeEventListener("focus", checkWhenVisible);
+        window.removeEventListener("online", checkWhenVisible);
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      });
+      void checkServingRelease();
+    }
+  }
 
   if (signals !== null && signals.errorClicks !== false) {
     const windowMs =
