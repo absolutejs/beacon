@@ -4516,6 +4516,45 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("suppresses an injected service-worker rejection through the wrapped register path", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    const container = new EventTarget() as EventTarget & {
+      register: ServiceWorkerContainer["register"];
+    };
+    container.register = async () => {
+      const error = new Error("Rejected");
+      error.stack =
+        "Error: Rejected\n" +
+        "    at ServiceWorkerContainer.<anonymous> (<anonymous>:669:449)\n" +
+        "    at ServiceWorkerContainer.register (<anonymous>:460:195)";
+      throw error;
+    };
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: container,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      await beacon.flush();
+      expect(signalsSent(sent, "service_worker_failure")).toHaveLength(0);
+      await beacon.close();
+    } finally {
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
+  });
+
   test("suppresses a transient registration failure recovered by retry", async () => {
     const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
       navigator,

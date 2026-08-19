@@ -110,7 +110,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.49";
+export const BEACON_SDK_VERSION = "0.6.50";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -6315,6 +6315,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           return registration;
         } catch (error) {
           const registrationError = toError(error);
+          // The general event filter sees only the synthetic outer
+          // "Service worker failure" event. Classify the raw platform/host
+          // rejection here, before its recognizable message and injected
+          // stack are nested under `extra.serviceWorkerError`.
+          if (filterKnownNoise && isKnownBeaconNoise(registrationError)) {
+            throw error;
+          }
           if (transientRegistrationErrors.has(registrationError.name)) {
             const existing = pendingRegistrationFailures.get(endpointLabel);
             if (existing !== undefined) {
