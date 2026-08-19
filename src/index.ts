@@ -110,7 +110,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.50";
+export const BEACON_SDK_VERSION = "0.6.51";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1006,6 +1006,17 @@ const isExtensionOnlyStack = (event: Pick<BeaconEvent, "stack">): boolean => {
     frames.every((frame) => EXTENSION_STACK_PROTOCOL.test(frame))
   );
 };
+const isExtensionInjectedStack = (
+  event: Pick<BeaconEvent, "stack">,
+): boolean => {
+  const firstFrame = (event.stack ?? "")
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  return firstFrame !== undefined && EXTENSION_STACK_PROTOCOL.test(firstFrame);
+};
 const isInjectedServiceWorkerRejection = (
   event: Pick<BeaconEvent, "message" | "stack">,
 ): boolean => {
@@ -1711,6 +1722,22 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       }
     | undefined;
   let reportErrorClick: ((errorName: string) => void) | null = null;
+  const reportCapturedErrorClick = (
+    error: Error,
+    tags?: BeaconEvent["tags"],
+  ): void => {
+    if (
+      filterKnownNoise &&
+      isKnownBeaconNoise({
+        message: error.message,
+        name: error.name,
+        stack: error.stack,
+        tags,
+      })
+    )
+      return;
+    reportErrorClick?.(error.name);
+  };
   let reportFormAbandonmentOnNavigation:
     ((departedUrl?: string) => void) | null = null;
   const focusedEditable = (): HTMLElement | null => {
@@ -2458,6 +2485,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   ): void => {
     if (signals === null || signals.failedRequests === false) return;
     const error = toError(errorValue);
+    // Extensions commonly replace `window.fetch` with a wrapper whose thrown
+    // error starts inside the extension and only then re-enters application
+    // frames. The page cannot fix that transport implementation; retain the
+    // fetch breadcrumb but do not promote its wrapper failure to an issue.
+    if (filterKnownNoise && isExtensionInjectedStack(error)) return;
     const kind = failureKind(error);
     // Request cancellation is an expected browser/application lifecycle event.
     // It remains a breadcrumb but must not create an issue.
@@ -3028,7 +3060,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           level: "error",
           tags: errorEventTags(event),
         });
-        reportErrorClick?.(error.name);
+        reportCapturedErrorClick(error, errorEventTags(event));
         return;
       }
 
@@ -3084,7 +3116,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const reason = event.reason;
       if (reason instanceof Error) {
         captureException(reason, { level: "error" });
-        reportErrorClick?.(reason.name);
+        reportCapturedErrorClick(reason);
         return;
       }
       if (
@@ -4463,7 +4495,32 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         );
       });
 
-      return stylesheets.every((link) => link.sheet !== null);
+      if (!stylesheets.every((link) => link.sheet !== null)) return false;
+      // In embedded/test documents with no linked stylesheet there is no
+      // stylesheet load state to validate. Avoid treating coincidental class
+      // names such as "flex" as evidence that CSS failed to load.
+      if (stylesheets.length === 0) return true;
+      // A browser host or cache layer can leave a stylesheet object attached
+      // while its utility rules are absent. One unapplied positioning/display
+      // utility makes every geometry result suspect, so wait instead of
+      // opening a cascade of overflow and collision issues from fallback DOM.
+      const utilityExpectations: ReadonlyArray<
+        [selector: string, property: "display" | "position", expected: string]
+      > = [
+        ['[class~="absolute"]', "position", "absolute"],
+        ['[class~="fixed"]', "position", "fixed"],
+        ['[class~="flex"]', "display", "flex"],
+        ['[class~="grid"]', "display", "grid"],
+        ['[class~="hidden"]', "display", "none"],
+      ];
+      return utilityExpectations.every(([selector, property, expected]) => {
+        const sample = document.querySelector(selector);
+
+        return (
+          sample === null ||
+          window.getComputedStyle(sample)[property] === expected
+        );
+      });
     };
 
     const runSettledScan = (): void => {
@@ -4471,13 +4528,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       // stylesheet failed to attach. Resource instrumentation owns that
       // failure; emitting dozens of collisions from the unstyled fallback DOM
       // would hide the single actionable cause.
-      const visualStylesReady = documentStylesAreReady();
-      if (detectOverflow && visualStylesReady) scanForOverflow();
-      if (detectControlCollision && visualStylesReady)
-        scanForControlCollisions();
-      if (detectOcclusion && visualStylesReady) scanForOcclusion();
-      if (detectInvisibleText && visualStylesReady) scanForInvisibleText();
-      if (detectThemeMismatch && visualStylesReady) scanForThemeMismatch();
+      const geometryReady =
+        documentStylesAreReady() && !mobileKeyboardViewportActive();
+      if (detectOverflow && geometryReady) scanForOverflow();
+      if (detectControlCollision && geometryReady) scanForControlCollisions();
+      if (detectOcclusion && geometryReady) scanForOcclusion();
+      if (detectInvisibleText && geometryReady) scanForInvisibleText();
+      if (detectThemeMismatch && geometryReady) scanForThemeMismatch();
       if (detectStuckLoading) checkStuckLoading();
     };
 
@@ -4720,13 +4777,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           const inputDelayMs = hasPhaseTiming
             ? Math.round(Math.max(0, entry.processingStart! - entry.startTime))
             : undefined;
-          // A detached/removed Event Timing target with no blocking frame and
-          // effectively no handler work leaves only browser presentation time.
+          // An Event Timing entry with no blocking frame and effectively no
+          // handler work leaves only browser presentation time.
           // Web-vitals still retains the aggregate INP sample; do not promote
-          // that unfixable sample to an issue. Preserve targetless entries when
-          // a blocking frame or meaningful application processing remains.
+          // that unfixable browser sample to an issue. Preserve entries when a
+          // blocking frame or meaningful application processing remains.
           if (
-            target === "unknown" &&
             overlappingFrame === undefined &&
             processingDurationMs !== undefined &&
             processingDurationMs <= 16 &&

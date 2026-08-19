@@ -1401,6 +1401,29 @@ describe("auto-instrumentation", () => {
     ).toBe(true);
   });
 
+  test("does not synthesize an error-click for a filtered extension error", async () => {
+    const { beacon, sent } = make({
+      instrument: { ...ALL_OFF, clicks: true, globalErrors: true },
+      signals: { errorClicks: true },
+    });
+    track(beacon);
+    const button = document.createElement("button");
+    document.body.append(button);
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const error = new TypeError("Cannot read properties of undefined");
+    error.stack =
+      "TypeError: Cannot read properties of undefined\n" +
+      "    at F (chrome-extension://extension-id/executors/200.js:1:761)\n" +
+      "    at X (chrome-extension://extension-id/executors/200.js:1:1442)";
+    window.dispatchEvent(
+      new ErrorEvent("error", { error, message: error.message }),
+    );
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+    button.remove();
+  });
+
   test("preserves application errors with a mixed extension and app stack", () => {
     expect(
       isKnownBeaconNoise({
@@ -1985,6 +2008,29 @@ describe("auto-instrumentation", () => {
     globalThis.fetch = originalFetch;
   });
 
+  test("keeps extension-injected fetch failures as breadcrumbs only", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      const error = new TypeError("Failed to fetch");
+      error.stack =
+        "TypeError: Failed to fetch\n" +
+        "    at wrapped (chrome-extension://extension-id/requests.js:1:4)\n" +
+        "    at load (https://app.example/assets/app.js:20:2)";
+      throw error;
+    }) as unknown as typeof fetch;
+    const { beacon, sent } = make({
+      instrument: { ...ALL_OFF, fetch: true },
+      signals: { failedRequests: true },
+    });
+    track(beacon);
+
+    await fetch("/v1/deals").catch(() => undefined);
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+    globalThis.fetch = originalFetch;
+  });
+
   test("aggregates a concurrent connectivity interruption without losing attempts", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => {
@@ -2461,6 +2507,94 @@ describe("layout-overflow signals", () => {
     ).toHaveLength(0);
     element.remove();
     link.remove();
+  });
+
+  test("does not scan when attached styles omit active layout utilities", async () => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    Object.defineProperty(link, "sheet", {
+      configurable: true,
+      value: { cssRules: [] },
+    });
+    const element = document.createElement("button");
+    element.className = "absolute inset-0";
+    document.head.append(link);
+    document.body.append(element);
+    mockRect(element, domRect(0, 1_296));
+    const { beacon, sent } = make({
+      signals: {
+        controlCollisions: true,
+        layoutOverflowSettleMs: 5,
+        layoutOverflows: true,
+      },
+    });
+    track(beacon);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await beacon.flush();
+
+    expect(window.getComputedStyle(element).position).not.toBe("absolute");
+    expect(
+      sent.flatMap((envelope) =>
+        envelope.events.filter(
+          (event) => event.tags?.signal === "layout_overflow",
+        ),
+      ),
+    ).toHaveLength(0);
+    element.remove();
+    link.remove();
+  });
+
+  test("pauses geometry scans while the mobile keyboard owns the viewport", async () => {
+    const originalViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const originalInnerHeight = Object.getOwnPropertyDescriptor(
+      window,
+      "innerHeight",
+    );
+    const viewport = Object.assign(new EventTarget(), {
+      height: 450,
+      offsetLeft: 69,
+      offsetTop: 200,
+      width: 552,
+    });
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: viewport,
+    });
+    Object.defineProperty(window, "innerHeight", {
+      configurable: true,
+      value: 800,
+    });
+    const input = document.createElement("input");
+    document.body.append(input);
+    input.focus();
+    mockRect(document.body, domRect(-69, 483));
+    try {
+      const { beacon, sent } = makeOverflowBeacon();
+      await scan(beacon);
+      expect(
+        sent.flatMap((envelope) =>
+          envelope.events.filter(
+            (event) => event.tags?.signal === "layout_overflow",
+          ),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      input.remove();
+      if (originalViewport === undefined) {
+        Reflect.deleteProperty(window, "visualViewport");
+      } else {
+        Object.defineProperty(window, "visualViewport", originalViewport);
+      }
+      if (originalInnerHeight === undefined) {
+        Reflect.deleteProperty(window, "innerHeight");
+      } else {
+        Object.defineProperty(window, "innerHeight", originalInnerHeight);
+      }
+    }
   });
 
   test("reports an unclassed app image with privacy-safe overflow provenance", async () => {
@@ -3630,7 +3764,7 @@ describe("ambient watchdog signals", () => {
     }
   });
 
-  test("drops only presentation-only slow interactions without a target", async () => {
+  test("drops presentation-only slow interactions with or without a target", async () => {
     const original = globalThis.PerformanceObserver;
     class FakePerformanceObserver {
       private readonly callback: PerformanceObserverCallback;
@@ -3656,6 +3790,7 @@ describe("ambient watchdog signals", () => {
           return;
         }
         if (options.type !== "event") return;
+        const button = document.createElement("button");
         this.callback(
           {
             getEntries: () => [
@@ -3667,7 +3802,7 @@ describe("ambient watchdog signals", () => {
                 processingEnd: 108,
                 processingStart: 108,
                 startTime: 100,
-                target: null,
+                target: button,
               } as unknown as PerformanceEntry,
               {
                 duration: 1200,
