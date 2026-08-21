@@ -2630,6 +2630,49 @@ describe("layout-overflow signals", () => {
     }
   });
 
+  test("pauses geometry scans while iOS leaves the visual viewport horizontally shifted", async () => {
+    const originalViewport = Object.getOwnPropertyDescriptor(
+      window,
+      "visualViewport",
+    );
+    const viewport = Object.assign(new EventTarget(), {
+      height: 729,
+      offsetLeft: 7,
+      offsetTop: 0,
+      scale: 1,
+      width: 402,
+    });
+    Object.defineProperty(window, "visualViewport", {
+      configurable: true,
+      value: viewport,
+    });
+    Object.defineProperty(document.documentElement, "clientWidth", {
+      configurable: true,
+      value: 402,
+    });
+    mockRect(document.body, domRect(-7, 395));
+    try {
+      const { beacon, sent } = make({
+        signals: { layoutOverflowSettleMs: 0, layoutOverflows: true },
+      });
+      track(beacon);
+      await scan(beacon);
+      expect(
+        sent.flatMap((envelope) =>
+          envelope.events.filter(
+            (event) => event.tags?.signal === "layout_overflow",
+          ),
+        ),
+      ).toHaveLength(0);
+    } finally {
+      if (originalViewport === undefined) {
+        Reflect.deleteProperty(window, "visualViewport");
+      } else {
+        Object.defineProperty(window, "visualViewport", originalViewport);
+      }
+    }
+  });
+
   test("reports an unclassed app image with privacy-safe overflow provenance", async () => {
     const { beacon, sent } = makeOverflowBeacon();
     const parent = document.createElement("figure");
@@ -4111,6 +4154,75 @@ describe("ambient watchdog signals", () => {
       await beacon.flush();
       expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(1);
       button.remove();
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("groups unknown layout shifts by stable lifecycle and interaction provenance", async () => {
+    const original = globalThis.PerformanceObserver;
+    let callback: PerformanceObserverCallback | undefined;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(next: PerformanceObserverCallback) {
+        this.callback = next;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type === "layout-shift") callback = this.callback;
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    const report = async (targetClass: string, ageMs: number) => {
+      const button = document.createElement("button");
+      button.className = targetClass;
+      document.body.append(button);
+      const { beacon, sent } = makeWatchdogBeacon({
+        instrument: { ...ALL_OFF, clicks: true },
+      });
+      button.click();
+      callback?.(
+        {
+          getEntries: () => [
+            {
+              duration: 0,
+              entryType: "layout-shift",
+              hadRecentInput: false,
+              sources: [],
+              startTime: performance.now() + ageMs,
+              value: 0.18,
+            } as unknown as PerformanceEntry,
+          ],
+        } as PerformanceObserverEntryList,
+        new FakePerformanceObserver(
+          () => undefined,
+        ) as unknown as PerformanceObserver,
+      );
+      await beacon.flush();
+      const event = signalsSent(sent, "disruptive_layout_shift")[0];
+      await beacon.close();
+      button.remove();
+
+      return event;
+    };
+    try {
+      const first = await report("wallet-trigger", 650);
+      const laterSameCause = await report("wallet-trigger", 900);
+      const differentCause = await report("coupon-trigger", 650);
+
+      expect(first?.tags).toMatchObject({
+        interactionTarget: "button.wallet-trigger",
+        interactionType: "click",
+        target: "unknown",
+      });
+      expect(Number(first?.tags?.interactionAgeMs)).toBeGreaterThanOrEqual(650);
+      expect(first?.tags?.framePhase).toBeDefined();
+      expect(laterSameCause?.groupingKey).toBe(first?.groupingKey);
+      expect(differentCause?.groupingKey).not.toBe(first?.groupingKey);
     } finally {
       globalThis.PerformanceObserver = original;
     }

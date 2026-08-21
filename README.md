@@ -125,6 +125,9 @@ beacon.captureMessage("checkout started", "info");
   scroll containers, and absolutely positioned escapees (badges, popovers,
   drawers) are skipped by design; mark deliberate
   bleeds with `data-beacon-overflow="allow"`.
+  Geometry scans pause while the mobile visual viewport is horizontally
+  shifted or zoomed, so iOS keyboard/pan coordinates are not mistaken for
+  document overflow.
 - **Control-collision signals** — the same settled scan reports interactive
   controls from separate layout groups whose border boxes overlap or render
   with effectively no spacing. Same-parent rows, semantic control groups,
@@ -199,7 +202,10 @@ beacon.captureMessage("checkout started", "info");
   interactions and separates input delay, handler time, and presentation delay.
   Overlapping long animation frames include their worst script when the browser
   exposes it; missing browser attribution is labeled explicitly. Layout
-  Instability names shifted elements. Successful HTTP responses can be
+  Instability names shifted elements. When the browser supplies no shifted
+  node, Beacon retains startup/runtime phase plus recent interaction type,
+  target, and age; stable provenance separates issue grouping while volatile
+  age remains diagnostic-only. Successful HTTP responses can be
   classified through the host-owned `instrument.classifyResponse` callback for
   GraphQL-style errors. Selected HTTP 4xx/5xx responses can be promoted through
   the opt-in `instrument.classifyErrorResponse` callback when application context

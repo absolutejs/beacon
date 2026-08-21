@@ -113,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.53";
+export const BEACON_SDK_VERSION = "0.6.54";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1237,6 +1237,7 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "errorCount",
   "inputDelayMs",
   "interactionId",
+  "interactionAgeMs",
   "loadCount",
   "newestRelease",
   "obscuredPx",
@@ -1683,6 +1684,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const FORM_FRUSTRATION_THRESHOLD = 3;
   const FORM_FRUSTRATION_WINDOW_MS = 60000;
   const LAYOUT_SHIFT_RECENT_INTERACTION_MS = 500;
+  const LAYOUT_SHIFT_INTERACTION_PROVENANCE_MS = 10000;
   const LAYOUT_SHIFT_VIEWPORT_RESIZE_SETTLE_MS = 500;
   const VIEWPORT_RESIZE_HISTORY_LIMIT = 8;
   const FORM_INVALID_BURST_GAP_MS = 100;
@@ -1763,6 +1765,20 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       visualViewport.height <
         window.innerHeight * KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX &&
       focusedEditable() !== null
+    );
+  };
+  const visualViewportHorizontallyShifted = (): boolean => {
+    const visualViewport = window.visualViewport;
+    if (visualViewport === undefined || visualViewport === null) return false;
+    const layoutWidth = document.documentElement.clientWidth;
+    const tolerancePx = 2;
+
+    return (
+      Math.abs(visualViewport.offsetLeft) > tolerancePx ||
+      (visualViewport.width > 0 &&
+        visualViewport.width < layoutWidth - tolerancePx) ||
+      (visualViewport.scale !== undefined &&
+        Math.abs(visualViewport.scale - 1) > 0.01)
     );
   };
   // Set by the settled-scan watchdogs so SPA navigations recorded by the
@@ -4663,7 +4679,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       // failure; emitting dozens of collisions from the unstyled fallback DOM
       // would hide the single actionable cause.
       const geometryReady =
-        documentStylesAreReady() && !mobileKeyboardViewportActive();
+        documentStylesAreReady() &&
+        !mobileKeyboardViewportActive() &&
+        !visualViewportHorizontallyShifted();
       if (detectOverflow && geometryReady) scanForOverflow();
       if (detectControlCollision && geometryReady) scanForControlCollisions();
       if (detectOcclusion && geometryReady) scanForOcclusion();
@@ -4771,11 +4789,46 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             .filter((target): target is string => target !== undefined)
             .slice(0, 5);
           const key = targets.join(",") || "unknown";
-          if (reported.has(key)) continue;
-          reported.add(key);
+          const framePhase =
+            entry.startTime < MAIN_THREAD_STALL_DEFAULT_WINDOW_MS
+              ? "startup"
+              : "runtime";
+          const interactionProvenance =
+            key === "unknown" &&
+            recentInteraction !== undefined &&
+            interactionAgeMs !== undefined &&
+            interactionAgeMs >= 0 &&
+            interactionAgeMs <= LAYOUT_SHIFT_INTERACTION_PROVENANCE_MS
+              ? recentInteraction
+              : undefined;
+          const reportKey =
+            key === "unknown"
+              ? [
+                  key,
+                  framePhase,
+                  interactionProvenance?.type ?? "no-interaction",
+                  interactionProvenance?.target ?? "unknown",
+                ].join("|")
+              : key;
+          if (reported.has(reportKey)) continue;
+          reported.add(reportKey);
           emitSignal(
             `Disruptive layout shift — ${key} — ${shortUrl(location.href)}`,
             {
+              ...(key === "unknown"
+                ? {
+                    framePhase,
+                    ...(interactionProvenance === undefined
+                      ? {}
+                      : {
+                          interactionAgeMs: String(
+                            Math.round(interactionAgeMs ?? 0),
+                          ),
+                          interactionTarget: interactionProvenance.target,
+                          interactionType: interactionProvenance.type,
+                        }),
+                  }
+                : {}),
               shiftValue: String(entry.value ?? 0),
               signal: BEACON_SIGNAL.DISRUPTIVE_LAYOUT_SHIFT,
               target: key,
