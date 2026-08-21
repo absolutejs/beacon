@@ -83,6 +83,9 @@ export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
 export const BEACON_ATTRIBUTE = {
   /** Names an application root whose settled empty state is a failure. */
   APP_ROOT: "data-beacon-app-root",
+  /** Groups controls whose intentional near-touching layout should not be
+   * reported as a collision. True border-box overlaps remain reportable. */
+  CONTROL_GROUP: "data-beacon-control-group",
   DEAD_CLICK: "data-beacon-dead-click",
   NAME: "data-beacon-name",
   /** Names an iframe whose initial load should be watched for a stall. */
@@ -110,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.51";
+export const BEACON_SDK_VERSION = "0.6.53";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -2804,12 +2807,21 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         for (const entry of list.getEntries()) {
           const animationFrame = entry as PerformanceEntry & {
             blockingDuration?: number;
+            firstUIEventTimestamp?: number;
+            renderStart?: number;
             scripts?: Array<{
               duration?: number;
+              forcedStyleAndLayoutDuration?: number;
               functionName?: string;
               invoker?: string;
+              invokerType?: string;
+              pauseDuration?: number;
+              sourceCharPosition?: number;
+              sourceFunctionName?: string;
               sourceURL?: string;
+              windowAttribution?: string;
             }>;
+            styleAndLayoutStart?: number;
           };
           const blockingDuration =
             entry.entryType === "long-animation-frame" &&
@@ -2828,9 +2840,60 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           stallTimes.push(entryAt);
           if (stallTimes.length < stallCount) continue;
           reported = true;
-          const script = [...(animationFrame.scripts ?? [])].sort(
+          const scriptsByDuration = [...(animationFrame.scripts ?? [])].sort(
             (left, right) => (right.duration ?? 0) - (left.duration ?? 0),
-          )[0];
+          );
+          const script = scriptsByDuration[0];
+          const frameEnd = entry.startTime + entry.duration;
+          const renderDuration =
+            animationFrame.renderStart === undefined ||
+            animationFrame.renderStart <= 0
+              ? undefined
+              : Math.max(0, frameEnd - animationFrame.renderStart);
+          const styleAndLayoutDuration =
+            animationFrame.styleAndLayoutStart === undefined ||
+            animationFrame.styleAndLayoutStart <= 0
+              ? undefined
+              : Math.max(0, frameEnd - animationFrame.styleAndLayoutStart);
+          const scriptDuration = (animationFrame.scripts ?? []).reduce(
+            (total, timing) => total + (timing.duration ?? 0),
+            0,
+          );
+          const scriptTimings = scriptsByDuration.slice(0, 5).map((timing) => ({
+            durationMs: Math.round(timing.duration ?? 0),
+            ...(timing.forcedStyleAndLayoutDuration === undefined
+              ? {}
+              : {
+                  forcedStyleAndLayoutDurationMs: Math.round(
+                    timing.forcedStyleAndLayoutDuration,
+                  ),
+                }),
+            ...(timing.invoker === undefined
+              ? {}
+              : { invoker: timing.invoker }),
+            ...(timing.invokerType === undefined
+              ? {}
+              : { invokerType: timing.invokerType }),
+            ...(timing.pauseDuration === undefined
+              ? {}
+              : { pauseDurationMs: Math.round(timing.pauseDuration) }),
+            ...(timing.sourceCharPosition === undefined
+              ? {}
+              : { sourceCharPosition: timing.sourceCharPosition }),
+            ...(timing.sourceFunctionName === undefined &&
+            timing.functionName === undefined
+              ? {}
+              : {
+                  sourceFunctionName:
+                    timing.sourceFunctionName ?? timing.functionName,
+                }),
+            ...(timing.sourceURL === undefined
+              ? {}
+              : { sourceURL: shortUrl(timing.sourceURL) }),
+            ...(timing.windowAttribution === undefined
+              ? {}
+              : { windowAttribution: timing.windowAttribution }),
+          }));
           emitSignal(
             `Main-thread stall — repeated long frames blocked the page — ${shortUrl(location.href)}`,
             {
@@ -2843,19 +2906,74 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                   }),
               durationMs: String(Math.round(entry.duration)),
               entryType: entry.entryType,
-              signal: BEACON_SIGNAL.MAIN_THREAD_STALL,
-              ...(script?.functionName === undefined
+              framePhase:
+                entry.startTime < stallWindowMs ? "startup" : "runtime",
+              ...(animationFrame.firstUIEventTimestamp === undefined ||
+              animationFrame.firstUIEventTimestamp <= 0
                 ? {}
-                : { scriptFunction: script.functionName }),
+                : {
+                    firstUIEventAtMs: String(
+                      Math.round(animationFrame.firstUIEventTimestamp),
+                    ),
+                  }),
+              ...(renderDuration === undefined
+                ? {}
+                : { renderDurationMs: String(Math.round(renderDuration)) }),
+              signal: BEACON_SIGNAL.MAIN_THREAD_STALL,
+              scriptAttribution:
+                script === undefined ? "unavailable" : "available",
+              scriptCount: String(animationFrame.scripts?.length ?? 0),
+              scriptDurationMs: String(Math.round(scriptDuration)),
+              ...(script?.forcedStyleAndLayoutDuration === undefined
+                ? {}
+                : {
+                    scriptForcedStyleAndLayoutMs: String(
+                      Math.round(script.forcedStyleAndLayoutDuration),
+                    ),
+                  }),
+              ...(script?.sourceFunctionName === undefined &&
+              script?.functionName === undefined
+                ? {}
+                : {
+                    scriptFunction:
+                      script.sourceFunctionName ?? script.functionName ?? "",
+                  }),
               ...(script?.invoker === undefined
                 ? {}
                 : { scriptInvoker: script.invoker }),
+              ...(script?.invokerType === undefined
+                ? {}
+                : { scriptInvokerType: script.invokerType }),
+              ...(script?.pauseDuration === undefined
+                ? {}
+                : {
+                    scriptPauseDurationMs: String(
+                      Math.round(script.pauseDuration),
+                    ),
+                  }),
+              ...(script?.sourceCharPosition === undefined
+                ? {}
+                : {
+                    scriptSourceCharPosition: String(script.sourceCharPosition),
+                  }),
               ...(script?.sourceURL === undefined
                 ? {}
                 : { scriptSource: shortUrl(script.sourceURL) }),
+              ...(script?.windowAttribution === undefined
+                ? {}
+                : { scriptWindowAttribution: script.windowAttribution }),
               stallCount: String(stallTimes.length),
+              ...(styleAndLayoutDuration === undefined
+                ? {}
+                : {
+                    styleAndLayoutDurationMs: String(
+                      Math.round(styleAndLayoutDuration),
+                    ),
+                  }),
               windowMs: String(stallWindowMs),
             },
+            undefined,
+            scriptTimings.length === 0 ? undefined : { scriptTimings },
           );
           break;
         }
@@ -3168,7 +3286,23 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             .join(" ")
             .trim()
             .slice(0, SIGNAL_TEXT_MAX);
-          if (text !== "")
+          const loggedError = args.find((argument) => {
+            if (argument instanceof Error) return true;
+            if (typeof argument !== "object" || argument === null) return false;
+
+            try {
+              return typeof Reflect.get(argument, "stack") === "string";
+            } catch {
+              return false;
+            }
+          });
+          if (text !== "" && loggedError !== undefined) {
+            captureException(loggedError, {
+              extra: { consoleMessage: text },
+              level: "warning",
+              tags: { signal: BEACON_SIGNAL.CONSOLE_ERROR },
+            });
+          } else if (text !== "") {
             emitSignal(
               text,
               { signal: BEACON_SIGNAL.CONSOLE_ERROR },
@@ -3178,6 +3312,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               2,
               true,
             );
+          }
           if (text !== "") reportErrorClick?.("ConsoleError");
           inSignalConsole = false;
         }
@@ -3727,8 +3862,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
     const CONTROL_SELECTOR =
       'a[href], button, input, select, textarea, [role="button"]';
-    const INTENTIONAL_CONTROL_GROUP_SELECTOR =
-      'nav, [role="group"], [role="menu"], [role="radiogroup"], [role="tablist"], [role="toolbar"]';
+    const INTENTIONAL_CONTROL_GROUP_SELECTOR = `nav, [role="group"], [role="menu"], [role="radiogroup"], [role="tablist"], [role="toolbar"], [${BEACON_ATTRIBUTE.CONTROL_GROUP}]`;
     const clipsAxis = (overflow: string): boolean =>
       overflow === "auto" ||
       overflow === "scroll" ||

@@ -130,8 +130,11 @@ beacon.captureMessage("checkout started", "info");
   with effectively no spacing. Same-parent rows, semantic control groups,
   navigation, and positioned controls that merely touch are excluded so tabs,
   segmented controls, and floating actions remain quiet. Tune the near-touch
-  threshold with `signals.controlCollisionGapPx`; intentional exceptions can
-  use `data-beacon-scan="allow"`.
+  threshold with `signals.controlCollisionGapPx`. Mark nested controls that
+  intentionally meet with `data-beacon-control-group`; this suppresses only
+  near-touch reports, while true overlaps remain visible. Use
+  `data-beacon-scan="allow"` only when the whole subtree must be exempt from
+  every visual scan.
 - **Ambient watchdogs** — silent failures users abandon instead of reporting
   become warning issues: scroll jail (a leaked modal scroll lock), stuck
   loading (`aria-busy`/`role="progressbar"` that never resolves), occluded

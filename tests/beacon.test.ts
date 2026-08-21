@@ -2336,6 +2336,39 @@ describe("auto-instrumentation", () => {
     expect(fingerprints[2]).not.toBe(fingerprints[0]);
   });
 
+  test("console errors preserve a logged Error's original stack", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, console: true },
+        project: "web",
+        signals: { consoleErrors: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const originalError = new TypeError("renderer failed");
+    originalError.stack =
+      "TypeError: renderer failed\n    at updateComponent (/app/Profile.vue:42:7)";
+
+    console.error("[Vue warn]", originalError);
+    await beacon.flush();
+
+    const captured = sent[0]?.events[0];
+    expect(captured).toMatchObject({
+      level: "warning",
+      message: "renderer failed",
+      name: "TypeError",
+      stack:
+        "TypeError: renderer failed\n    at updateComponent (/app/Profile.vue:42:7)",
+      tags: { signal: "console_error" },
+    });
+    expect(captured?.extra?.consoleMessage).toBe(
+      "[Vue warn] TypeError: renderer failed",
+    );
+  });
+
   test("console stack trimming works without Error.captureStackTrace", async () => {
     const captureStackTraceDescriptor = Object.getOwnPropertyDescriptor(
       Error,
@@ -3480,6 +3513,10 @@ describe("ambient watchdog signals", () => {
       expect(events[0]?.tags).toMatchObject({
         blockingDurationMs: "280",
         entryType: "long-animation-frame",
+        framePhase: "startup",
+        scriptAttribution: "unavailable",
+        scriptCount: "0",
+        scriptDurationMs: "0",
         stallCount: "3",
       });
       durations = [810, 820, 830];
@@ -3489,6 +3526,95 @@ describe("ambient watchdog signals", () => {
       expect(secondEvents).toHaveLength(1);
       expect(secondEvents[0]?.tags?.blockingDurationMs).toBe("830");
       expect(secondEvents[0]?.groupingKey).toBe(events[0]?.groupingKey);
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("retains detailed long-animation-frame attribution", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(): void {
+        this.callback(
+          {
+            getEntries: () =>
+              [210, 230, 480].map((blockingDuration, index) => ({
+                blockingDuration,
+                duration: index === 2 ? 540 : blockingDuration,
+                entryType: "long-animation-frame",
+                firstUIEventTimestamp: index === 2 ? 2_080 : 0,
+                renderStart: index === 2 ? 2_400 : 0,
+                scripts:
+                  index === 2
+                    ? [
+                        {
+                          duration: 260,
+                          forcedStyleAndLayoutDuration: 34,
+                          invoker: "BUTTON.onclick",
+                          invokerType: "event-listener",
+                          pauseDuration: 6,
+                          sourceCharPosition: 842,
+                          sourceFunctionName: "hydrateProfile",
+                          sourceURL:
+                            "https://app.example/assets/profile.js?token=secret",
+                          windowAttribution: "self",
+                        },
+                        { duration: 80 },
+                      ]
+                    : [],
+                startTime: index * 1_000,
+                styleAndLayoutStart: index === 2 ? 2_470 : 0,
+              })) as unknown as PerformanceEntry[],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "main_thread_stall")[0]?.tags).toMatchObject({
+        firstUIEventAtMs: "2080",
+        renderDurationMs: "140",
+        scriptAttribution: "available",
+        scriptCount: "2",
+        scriptDurationMs: "340",
+        scriptForcedStyleAndLayoutMs: "34",
+        scriptFunction: "hydrateProfile",
+        scriptInvoker: "BUTTON.onclick",
+        scriptInvokerType: "event-listener",
+        scriptPauseDurationMs: "6",
+        scriptSource: "/assets/profile.js",
+        scriptSourceCharPosition: "842",
+        scriptWindowAttribution: "self",
+        styleAndLayoutDurationMs: "70",
+      });
+      expect(
+        signalsSent(sent, "main_thread_stall")[0]?.extra?.scriptTimings,
+      ).toEqual([
+        {
+          durationMs: 260,
+          forcedStyleAndLayoutDurationMs: 34,
+          invoker: "BUTTON.onclick",
+          invokerType: "event-listener",
+          pauseDurationMs: 6,
+          sourceCharPosition: 842,
+          sourceFunctionName: "hydrateProfile",
+          sourceURL: "/assets/profile.js",
+          windowAttribution: "self",
+        },
+        { durationMs: 80 },
+      ]);
     } finally {
       globalThis.PerformanceObserver = original;
     }
@@ -5592,6 +5718,40 @@ describe("ambient watchdog signals", () => {
     await settle(beacon);
     expect(signalsSent(sent, "control_collision")).toHaveLength(0);
     toolbar.remove();
+  });
+
+  test("supports a Beacon control group without suppressing true overlaps", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const playlist = document.createElement("ol");
+    playlist.setAttribute(BEACON_ATTRIBUTE.CONTROL_GROUP, "");
+    const firstItem = document.createElement("li");
+    const first = document.createElement("button");
+    first.className = "playlist-item";
+    setRect(first, rectOf(100, 500, 100, 150));
+    firstItem.append(first);
+    const secondItem = document.createElement("li");
+    const second = document.createElement("button");
+    second.className = "playlist-item";
+    setRect(second, rectOf(100, 500, 151, 201));
+    secondItem.append(second);
+    playlist.append(firstItem, secondItem);
+    document.body.append(playlist);
+
+    await settle(beacon);
+    expect(signalsSent(sent, "control_collision")).toHaveLength(0);
+
+    setRect(second, rectOf(100, 500, 144, 194));
+    window.dispatchEvent(new Event("resize"));
+    await settle(beacon);
+    const events = signalsSent(sent, "control_collision");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      collidesWith: "button.playlist-item",
+      collisionKind: "overlap",
+      overlapPx: "6",
+      target: "button.playlist-item",
+    });
+    playlist.remove();
   });
 
   test("does not report a control covered by browser-extension UI", async () => {
