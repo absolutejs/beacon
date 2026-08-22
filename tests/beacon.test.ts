@@ -2789,6 +2789,22 @@ describe("layout-overflow signals", () => {
     parent.remove();
   });
 
+  test("does not report intentionally clipped material icon ligature text", async () => {
+    const { beacon, sent } = makeOverflowBeacon();
+    const icon = document.createElement("span");
+    icon.className = "material-icons";
+    icon.textContent = "settings";
+    icon.style.overflowX = "hidden";
+    mockRect(icon, domRect(0, 22));
+    Object.defineProperty(icon, "scrollWidth", { value: 67 });
+    Object.defineProperty(icon, "clientWidth", { value: 22 });
+    document.body.append(icon);
+
+    await scan(beacon);
+    expect(sent).toHaveLength(0);
+    icon.remove();
+  });
+
   test("reports clipped content unless an ellipsis treatment owns it", async () => {
     const { beacon, sent } = makeOverflowBeacon();
     const clipped = document.createElement("div");

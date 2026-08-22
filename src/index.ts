@@ -113,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.54";
+export const BEACON_SDK_VERSION = "0.6.55";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -3839,6 +3839,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         const overflowX = style.overflowX;
         if (overflowX === "auto" || overflowX === "scroll") return;
         if (overflowX === "hidden" || overflowX === "clip") {
+          // Material icon ligatures deliberately clip their readable fallback
+          // text to a fixed glyph square while the icon font is loading. Font
+          // failures have their own detector; this is not layout truncation.
+          if (isMaterialIconGlyph(element)) return;
           // A classic vertical scrollbar reduces clientWidth while the
           // element's border-box and scrollWidth remain equal. That gutter is
           // not horizontally clipped application content.
