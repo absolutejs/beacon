@@ -146,7 +146,8 @@ beacon.captureMessage("checkout started", "info");
   stalled `EventSource` streams, WebSocket connect/close flapping, request
   storms (one endpoint hammered in seconds), reload loops, stale releases (a
   service worker serving a build older than one this browser already ran),
-  font-face load failures, focus dropped to `<body>` when a dialog unmounts,
+  required font-face load failures (excluding intentional optional fallback),
+  focus dropped to `<body>` when a dialog unmounts,
   focus escaping or never entering an explicit modal, browser interventions,
   enforced CSP violations, repeated visible-page main-thread stalls, and form
   frustration (identical resubmits / repeated native-validation failures).

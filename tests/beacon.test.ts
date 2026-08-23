@@ -5400,11 +5400,15 @@ describe("ambient watchdog signals", () => {
   });
 
   const installFailedFont = ({
-    check = () => false,
+    check = (_font: string) => false,
+    display = "auto",
+    family = "Material Icons",
     load = async () => [] as FontFace[],
     webdriver = false,
   }: {
-    check?: () => boolean;
+    check?: (font: string) => boolean;
+    display?: FontDisplay;
+    family?: string;
     load?: () => Promise<FontFace[]>;
     webdriver?: boolean;
   } = {}) => {
@@ -5423,7 +5427,8 @@ describe("ambient watchdog signals", () => {
       check,
       forEach: (callback: (face: FontFace) => void) => {
         callback({
-          family: "Material Icons",
+          display,
+          family,
           status: "error",
           stretch: "normal",
           style: "normal",
@@ -5502,6 +5507,41 @@ describe("ambient watchdog signals", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     await beacon.flush();
     expect(signalsSent(sent, "font_failure")).toHaveLength(0);
+    expect(font.loadCalls()).toBe(1);
+    await beacon.close();
+    icon.remove();
+    font.restore();
+  });
+
+  test("ignores an optional font face whose fallback is intentional", async () => {
+    const font = installFailedFont({ display: "optional" });
+    const icon = visibleMaterialIcon();
+    const { beacon, sent } = makeWatchdogBeacon();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "font_failure")).toHaveLength(0);
+    expect(font.loadCalls()).toBe(0);
+    await beacon.close();
+    icon.remove();
+    font.restore();
+  });
+
+  test("canonicalizes a quoted browser font family before retrying", async () => {
+    let checkedFont = "";
+    const font = installFailedFont({
+      check: (value) => {
+        checkedFont = value;
+        return true;
+      },
+      family: '"Material Icons"',
+    });
+    const icon = visibleMaterialIcon();
+    const { beacon, sent } = makeWatchdogBeacon();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await beacon.flush();
+    expect(signalsSent(sent, "font_failure")).toHaveLength(0);
+    expect(checkedFont).toContain('16px "Material Icons"');
+    expect(checkedFont).not.toContain('\\"Material Icons\\"');
     expect(font.loadCalls()).toBe(1);
     await beacon.close();
     icon.remove();

@@ -6799,11 +6799,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       0,
       signals.fontFailureConfirmMs ?? FONT_FAILURE_CONFIRM_DEFAULT_MS,
     );
+    const canonicalFontFamily = (family: string): string =>
+      family.trim().replace(/^(['"])(.*)\1$/u, "$2");
     const normalizedFamily = (family: string): string =>
-      family
-        .trim()
-        .replace(/^(['"])(.*)\1$/u, "$2")
-        .toLowerCase();
+      canonicalFontFamily(family).toLowerCase();
     const isRendered = (element: HTMLElement): boolean => {
       for (
         let current: HTMLElement | null = element;
@@ -6838,11 +6837,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       element: HTMLElement,
       key: string,
     ): void => {
+      const family = canonicalFontFamily(face.family);
       reportedFonts.add(key);
       emitSignal(
-        `Font failure — ${face.family} failed to load — ${shortUrl(location.href)}`,
+        `Font failure — ${family} failed to load — ${shortUrl(location.href)}`,
         {
-          fontFamily: face.family,
+          fontFamily: family,
           fontStretch: face.stretch,
           fontStyle: face.style,
           fontWeight: face.weight,
@@ -6852,16 +6852,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       );
     };
     const verifyFontFailure = async (face: FontFace): Promise<void> => {
-      const key = [face.family, face.style, face.weight, face.stretch].join(
-        "|",
-      );
+      // `font-display: optional` explicitly authorizes immediate fallback on a
+      // constrained connection. Reporting that accepted fallback as an issue
+      // turns slow embedded browsers into false application failures.
+      if (face.display === "optional") return;
+      const family = canonicalFontFamily(face.family);
+      const key = [family, face.style, face.weight, face.stretch].join("|");
       if (reportedFonts.has(key) || checkingFonts.has(key)) return;
-      const element = affectedElement(face.family);
+      const element = affectedElement(family);
       if (element === null) return;
       checkingFonts.add(key);
       const fontAvailable = async (consumer: HTMLElement): Promise<boolean> => {
         const sample = consumer.textContent?.trim().slice(0, 64) || "BESbswy";
-        const font = `${face.style} ${face.weight} ${face.stretch} 16px ${JSON.stringify(face.family)}`;
+        const font = `${face.style} ${face.weight} ${face.stretch} 16px ${JSON.stringify(family)}`;
         try {
           await document.fonts.load(font, sample);
           return document.fonts.check(font, sample);
@@ -6877,7 +6880,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             cleanups.push(() => window.clearTimeout(timer));
           });
           if (document.visibilityState === "hidden") return;
-          const confirmedElement = affectedElement(face.family);
+          const confirmedElement = affectedElement(family);
           if (confirmedElement === null) return;
           if (await fontAvailable(confirmedElement)) return;
           reportFontFailure(face, confirmedElement, key);
