@@ -113,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.55";
+export const BEACON_SDK_VERSION = "0.6.57";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1674,6 +1674,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   // redirected back to the same path may already have polluted that streak.
   const RELOAD_LOOP_STORAGE_KEY = "beacon:reload-history-v4";
   const NAVIGATION_INTENT_STORAGE_KEY = "beacon:navigation-intent-v1";
+  const SERVICE_WORKER_UPDATE_INTENT_STORAGE_KEY =
+    "beacon:service-worker-update-intent-v1";
   const STALE_RELEASE_STORAGE_KEY = "beacon:release-first-seen";
   const STALE_RELEASE_GRACE_MS = 600000;
   const STALE_RELEASE_HISTORY_LIMIT = 5;
@@ -2061,7 +2063,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     fallbackFramesToDrop = 1,
     useDefaultFingerprint = false,
   ): void => {
-    if (staleClientRelease && signalTags.signal !== BEACON_SIGNAL.STALE_RELEASE)
+    // A reload loop is evidence about the page lifecycle itself, including a
+    // stale page repeatedly reloading before it can reach the current bundle.
+    // Keep it reportable while suppressing ordinary ambient findings from an
+    // obsolete detector bundle.
+    if (
+      staleClientRelease &&
+      signalTags.signal !== BEACON_SIGNAL.STALE_RELEASE &&
+      signalTags.signal !== BEACON_SIGNAL.RELOAD_LOOP
+    )
       return;
     const error = new Error(message);
     const captureStackTrace = (
@@ -2151,9 +2161,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
           staleClientRelease = true;
           // Remove synthetic findings buffered before the asynchronous probe
-          // completed. They came from the same obsolete detector bundle.
+          // completed. They came from the same obsolete detector bundle. A
+          // reload loop is the exception: stale-release recovery can itself be
+          // the loop, so deleting it would erase the most important evidence.
           for (let index = buffer.length - 1; index >= 0; index -= 1) {
-            if (buffer[index]?.tags?.signal !== undefined) {
+            const signal = buffer[index]?.tags?.signal;
+            if (signal !== undefined && signal !== BEACON_SIGNAL.RELOAD_LOOP) {
               buffer.splice(index, 1);
             }
           }
@@ -6628,6 +6641,35 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   }
 
   // ——— Boot-time watchdogs ——————————————————————————————————————————————
+  // A controller change is the one reliable browser event identifying an
+  // accepted service-worker handoff. Persist it for the next document because
+  // the current document may reload immediately after the event.
+  if (
+    typeof navigator.serviceWorker?.addEventListener === "function" &&
+    typeof sessionStorage !== "undefined"
+  ) {
+    const markServiceWorkerUpdate = (): void => {
+      try {
+        sessionStorage.setItem(
+          SERVICE_WORKER_UPDATE_INTENT_STORAGE_KEY,
+          String(Date.now()),
+        );
+      } catch {
+        // Restricted storage leaves ordinary reload-loop detection enabled.
+      }
+    };
+    navigator.serviceWorker.addEventListener(
+      "controllerchange",
+      markServiceWorkerUpdate,
+    );
+    cleanups.push(() =>
+      navigator.serviceWorker?.removeEventListener(
+        "controllerchange",
+        markServiceWorkerUpdate,
+      ),
+    );
+  }
+
   // Reload loop: several uninterrupted same-route document loads inside a
   // minute — a crash loop, redirect bounce, or a user mashing refresh against
   // a broken page. A different app route breaks the streak. So does a fresh
@@ -6679,6 +6721,22 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           history = [];
           entryKind = "intentional-navigation";
         }
+        const rawServiceWorkerUpdateIntent = sessionStorage.getItem(
+          SERVICE_WORKER_UPDATE_INTENT_STORAGE_KEY,
+        );
+        sessionStorage.removeItem(SERVICE_WORKER_UPDATE_INTENT_STORAGE_KEY);
+        const serviceWorkerUpdateIntentAt = Number(
+          rawServiceWorkerUpdateIntent,
+        );
+        if (
+          rawServiceWorkerUpdateIntent !== null &&
+          Number.isFinite(serviceWorkerUpdateIntentAt) &&
+          now - serviceWorkerUpdateIntentAt >= 0 &&
+          now - serviceWorkerUpdateIntentAt <= NAVIGATION_INTENT_MAX_AGE_MS
+        ) {
+          history = [];
+          entryKind = "service-worker-update";
+        }
         if (document.referrer !== "") {
           const referrer = new URL(document.referrer, location.href);
           if (referrer.origin !== location.origin) {
@@ -6687,19 +6745,6 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             // join them to page loads from before the user left our origin.
             history = [];
             entryKind = "external";
-          } else {
-            const controllerScript =
-              navigator.serviceWorker?.controller?.scriptURL;
-            if (
-              controllerScript !== undefined &&
-              new URL(controllerScript, location.href).pathname ===
-                referrer.pathname
-            ) {
-              // controllerchange reloads are explicit app-update handoffs. Some
-              // browsers expose the worker script as the document referrer.
-              history = [];
-              entryKind = "service-worker-update";
-            }
           }
         }
 
@@ -6720,13 +6765,24 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           emitSignal(
             `Reload loop — repeated page loads within a minute — ${shortUrl(location.href)}`,
             {
+              currentRelease: options.release ?? "unknown",
               entryKind,
               loadCount: String(loadCount),
               navigationType: navigation?.type ?? "unknown",
+              serviceWorkerControlled: String(
+                navigator.serviceWorker?.controller !== null &&
+                  navigator.serviceWorker?.controller !== undefined,
+              ),
+              serviceWorkerScript:
+                navigator.serviceWorker?.controller?.scriptURL ?? "none",
               signal: BEACON_SIGNAL.RELOAD_LOOP,
               windowMs: String(now - firstLoad),
             },
           );
+          // A page that reloads again immediately may not reach the periodic
+          // timer or lifecycle events. Splice the buffer into a keepalive send
+          // now so the fourth load remains observable.
+          void flush(true);
         }
       }
     } catch {

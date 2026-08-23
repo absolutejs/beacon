@@ -60,6 +60,7 @@ afterEach(async () => {
   // watchdogs — clear their storage so tests don't read as a reload loop.
   sessionStorage.removeItem("beacon:reload-history-v4");
   sessionStorage.removeItem("beacon:navigation-intent-v1");
+  sessionStorage.removeItem("beacon:service-worker-update-intent-v1");
   localStorage.removeItem("beacon:release-first-seen");
 });
 
@@ -5152,8 +5153,11 @@ describe("ambient watchdog signals", () => {
     const events = signalsSent(sent, "reload_loop");
     expect(events).toHaveLength(1);
     expect(events[0]?.tags).toMatchObject({
+      currentRelease: "unknown",
       entryKind: "app",
       loadCount: "4",
+      serviceWorkerControlled: "false",
+      serviceWorkerScript: "none",
       signal: "reload_loop",
       windowMs: expect.any(String),
     });
@@ -5252,17 +5256,47 @@ describe("ambient watchdog signals", () => {
   });
 
   test("starts a new reload streak after an accepted service worker update", async () => {
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:service-worker-update-intent-v1",
+      String(now),
+    );
+
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
+      expect(
+        JSON.parse(sessionStorage.getItem("beacon:reload-history-v4") ?? "[]"),
+      ).toEqual([{ at: expect.any(Number), route: location.pathname }]);
+      expect(
+        sessionStorage.getItem("beacon:service-worker-update-intent-v1"),
+      ).toBeNull();
+    } finally {
+      sessionStorage.removeItem("beacon:service-worker-update-intent-v1");
+    }
+  });
+
+  test("does not mistake an ordinary same-origin reload for a service worker update", async () => {
     const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
       navigator,
       "serviceWorker",
     );
+    const referrerDescriptor = Object.getOwnPropertyDescriptor(
+      Document.prototype,
+      "referrer",
+    );
     Object.defineProperty(document, "referrer", {
       configurable: true,
-      value: "about:service-worker",
+      value: location.href,
     });
     Object.defineProperty(navigator, "serviceWorker", {
       configurable: true,
-      value: { controller: { scriptURL: "about:service-worker" } },
+      value: {
+        addEventListener: () => undefined,
+        controller: { scriptURL: `${location.origin}/sw.js` },
+        removeEventListener: () => undefined,
+      },
     });
     const now = Date.now();
     sessionStorage.setItem(
@@ -5277,12 +5311,22 @@ describe("ambient watchdog signals", () => {
     try {
       const { beacon, sent } = makeWatchdogBeacon();
       await beacon.flush();
-      expect(signalsSent(sent, "reload_loop")).toHaveLength(0);
-      expect(
-        JSON.parse(sessionStorage.getItem("beacon:reload-history-v4") ?? "[]"),
-      ).toEqual([{ at: expect.any(Number), route: location.pathname }]);
+      const events = signalsSent(sent, "reload_loop");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        entryKind: "app",
+        serviceWorkerControlled: "true",
+        serviceWorkerScript: `${location.origin}/sw.js`,
+      });
     } finally {
       Reflect.deleteProperty(document, "referrer");
+      if (referrerDescriptor !== undefined) {
+        Object.defineProperty(
+          Document.prototype,
+          "referrer",
+          referrerDescriptor,
+        );
+      }
       if (serviceWorkerDescriptor === undefined) {
         Reflect.deleteProperty(navigator, "serviceWorker");
       } else {
@@ -5393,6 +5437,46 @@ describe("ambient watchdog signals", () => {
       });
       expect(signalsSent(sent, "server_error")).toHaveLength(0);
       expect(stale).toEqual([{ currentRelease: "v1", newestRelease: "v2" }]);
+      await beacon.close();
+    } finally {
+      window.fetch = originalFetch;
+    }
+  });
+
+  test("preserves and immediately sends a reload loop when the release probe reports stale", async () => {
+    const originalFetch = window.fetch;
+    const now = Date.now();
+    sessionStorage.setItem(
+      "beacon:reload-history-v4",
+      JSON.stringify([
+        { at: now - 3000, route: location.pathname },
+        { at: now - 2000, route: location.pathname },
+        { at: now - 1000, route: location.pathname },
+      ]),
+    );
+    window.fetch = (async () =>
+      new Response(JSON.stringify({ commit: "v2" }), {
+        headers: { "content-type": "application/json" },
+        status: 200,
+      })) as unknown as typeof window.fetch;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        beforeSend: (event) =>
+          event.tags?.signal === "stale_release" ? null : event,
+        release: "v1",
+        releaseProbe: { endpoint: "https://app.test/version" },
+      });
+      await tick();
+      await tick();
+
+      const events = signalsSent(sent, "reload_loop");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        currentRelease: "v1",
+        loadCount: "4",
+        signal: "reload_loop",
+      });
+      expect(signalsSent(sent, "stale_release")).toHaveLength(0);
       await beacon.close();
     } finally {
       window.fetch = originalFetch;
