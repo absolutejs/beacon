@@ -113,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.57";
+export const BEACON_SDK_VERSION = "0.6.58";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -4358,11 +4358,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const scanForInvisibleText = (): void => {
       const viewportWidth = document.documentElement.clientWidth;
       const viewportHeight = document.documentElement.clientHeight;
-      const candidates = document.querySelectorAll(
+      const priorityCandidates = document.querySelectorAll(
         'h1, h2, h3, button, a[href], label, [role="button"]',
       );
+      const proseCandidates = document.querySelectorAll(
+        "p, li, dt, dd, td, th, blockquote, figcaption",
+      );
+      const candidates = [
+        ...Array.from(priorityCandidates),
+        ...Array.from(proseCandidates),
+      ];
       let sampled = 0;
-      for (const element of Array.from(candidates)) {
+      for (const element of candidates) {
         if (sampled >= INVISIBLE_TEXT_SAMPLE_LIMIT) return;
         if (isScanExempt(element)) continue;
         if ((element.textContent ?? "").trim() === "") continue;

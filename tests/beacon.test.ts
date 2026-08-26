@@ -6140,6 +6140,31 @@ describe("ambient watchdog signals", () => {
     document.body.style.backgroundColor = "";
   });
 
+  test("reports nearly invisible semantic list text", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    document.body.style.backgroundColor = "rgb(20, 31, 48)";
+    const list = document.createElement("ul");
+    const item = document.createElement("li");
+    item.className = "invitation-benefit";
+    item.style.color = "rgb(30, 41, 59)";
+    const description = document.createElement("span");
+    description.textContent = "AI-sourced partnership matches";
+    item.append(description);
+    list.append(item);
+    setRect(item, rectOf(0, 320, 0, 42));
+    document.body.append(list);
+    await settle(beacon);
+    const events = signalsSent(sent, "invisible_text");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      contrast: "1.13",
+      target: "li.invitation-benefit",
+    });
+    list.remove();
+    document.body.style.backgroundColor = "";
+    await beacon.close();
+  });
+
   test("parses Tailwind oklch backgrounds instead of using a white ancestor", async () => {
     const button = document.createElement("button");
     button.textContent = "Resolve";

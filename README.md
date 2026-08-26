@@ -142,7 +142,8 @@ beacon.captureMessage("checkout started", "info");
   become warning issues: scroll jail (a leaked modal scroll lock), stuck
   loading (`aria-busy`/`role="progressbar"` that never resolves), occluded
   controls (leaked scrims/z-index bugs, skipped while a dialog is open),
-  invisible text (fg composites to its background — theme-token bugs),
+  invisible headings, controls, and semantic prose (fg composites to its
+  background — theme-token bugs),
   stalled `EventSource` streams, WebSocket connect/close flapping, request
   storms (one endpoint hammered in seconds), reload loops, stale releases (a
   service worker serving a build older than one this browser already ran),
