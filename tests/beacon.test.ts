@@ -3398,11 +3398,28 @@ describe("ambient watchdog signals", () => {
     dialog.append(closeButton);
     document.body.append(dialog);
     closeButton.focus();
+    closeButton.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     dialog.remove();
-    document.dispatchEvent(new Event("focusout"));
     await new Promise((resolve) => setTimeout(resolve, 20));
     await beacon.flush();
     expect(signalsSent(sent, "focus_lost")).toHaveLength(1);
+  });
+
+  test("does not reuse stale dialog focus for an unrelated focusout", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const closeButton = document.createElement("button");
+    dialog.append(closeButton);
+    const pageButton = document.createElement("button");
+    document.body.append(dialog, pageButton);
+    closeButton.focus();
+    dialog.remove();
+    pageButton.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await beacon.flush();
+    expect(signalsSent(sent, "focus_lost")).toHaveLength(0);
+    pageButton.remove();
   });
 
   test("reports a modal that never receives initial focus", async () => {

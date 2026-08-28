@@ -113,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.60";
+export const BEACON_SDK_VERSION = "0.6.61";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -5753,7 +5753,6 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     if (signals.focusLoss !== false || signals.modalFocusEscape !== false) {
       const DIALOG_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog';
       const MODAL_SELECTOR = '[aria-modal="true"], dialog[open]';
-      let lastDialogFocus: Element | null = null;
       const reportedFocusLoss = new Set<string>();
       const reportedModalEscapes = new WeakSet<Element>();
       const modalTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -5862,13 +5861,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             modalTimers.add(timer);
           }
         }
-        lastDialogFocus =
+      };
+      const onFocusOut = (event: FocusEvent): void => {
+        const target = event.target;
+        const candidate =
           target instanceof Element && target.closest(DIALOG_SELECTOR) !== null
             ? target
             : null;
-      };
-      const onFocusOut = (): void => {
-        const candidate = lastDialogFocus;
         if (candidate === null) return;
         setTimeout(() => {
           const active = document.activeElement;
