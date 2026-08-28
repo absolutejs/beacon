@@ -1438,6 +1438,32 @@ describe("auto-instrumentation", () => {
     ).toBe(false);
   });
 
+  test("drops extension-injected fetch failures with mixed page frames", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Failed to fetch",
+        name: "TypeError",
+        stack:
+          "TypeError: Failed to fetch\n" +
+          "    at wrapped (chrome-extension://extension-id/requests.js:1:4)\n" +
+          "    at send (https://www.googletagmanager.com/gtag/js:1:2)",
+      }),
+    ).toBe(true);
+  });
+
+  test("preserves application fetch failures when an extension is not the origin", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Failed to fetch",
+        name: "TypeError",
+        stack:
+          "TypeError: Failed to fetch\n" +
+          "    at save (https://example.com/app.js:20:4)\n" +
+          "    at injected (chrome-extension://extension-id/content.js:1:1)",
+      }),
+    ).toBe(false);
+  });
+
   test("identifies Google Web Renderer service-worker registration rejection", () => {
     expect(
       isKnownBeaconNoise({

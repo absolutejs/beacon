@@ -113,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.58";
+export const BEACON_SDK_VERSION = "0.6.59";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1048,6 +1048,9 @@ export const isKnownBeaconNoise = (
   isInstagramIosBridgeInjection(event, userAgent) ||
   isInjectedServiceWorkerRejection(event) ||
   isExtensionOnlyStack(event) ||
+  (event.name === "TypeError" &&
+    event.message === "Failed to fetch" &&
+    isExtensionInjectedStack(event)) ||
   (event.name === "Error" &&
     event.message === FACEBOOK_ANDROID_DETACHED_BRIDGE_MESSAGE &&
     event.tags?.errorFilename === FACEBOOK_ANDROID_PERFORMANCE_LOGGER &&
