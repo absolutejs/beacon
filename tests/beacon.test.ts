@@ -1219,10 +1219,7 @@ describe("auto-instrumentation", () => {
         },
       }),
     );
-    const abort = new DOMException(
-      "The user aborted a request.",
-      "AbortError",
-    );
+    const abort = new DOMException("The user aborted a request.", "AbortError");
     Object.defineProperty(abort, "stack", { value: undefined });
     dispatchUnhandledRejection(abort);
     await beacon.flush();
