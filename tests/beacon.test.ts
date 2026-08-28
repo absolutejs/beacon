@@ -1208,6 +1208,28 @@ describe("auto-instrumentation", () => {
     expect(sent).toHaveLength(0);
   });
 
+  test("drops a stackless browser abort from global rejection capture", async () => {
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { unhandledRejections: true },
+        project: "web",
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    const abort = new DOMException(
+      "The user aborted a request.",
+      "AbortError",
+    );
+    Object.defineProperty(abort, "stack", { value: undefined });
+    dispatchUnhandledRejection(abort);
+    await beacon.flush();
+
+    expect(sent).toHaveLength(0);
+  });
+
   test.each([
     ["Can't find variable: _AutofillCallbackHandler", "ReferenceError"],
     [
@@ -1512,6 +1534,18 @@ describe("auto-instrumentation", () => {
     },
   ])("preserves application and native service-worker failures", (event) => {
     expect(isKnownBeaconNoise(event)).toBe(false);
+  });
+
+  test("preserves the browser abort message when application frames exist", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "The user aborted a request.",
+        name: "AbortError",
+        stack:
+          "AbortError: The user aborted a request.\n" +
+          "    at cancelSearch (https://example.com/app.js:20:4)",
+      }),
+    ).toBe(false);
   });
 
   test.each([

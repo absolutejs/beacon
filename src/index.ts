@@ -113,7 +113,7 @@ export const BEACON_ATTRIBUTE = {
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.59";
+export const BEACON_SDK_VERSION = "0.6.60";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1020,6 +1020,12 @@ const isExtensionInjectedStack = (
 
   return firstFrame !== undefined && EXTENSION_STACK_PROTOCOL.test(firstFrame);
 };
+const isStacklessBrowserAbort = (
+  event: Pick<BeaconEvent, "message" | "name" | "stack">,
+): boolean =>
+  event.name === "AbortError" &&
+  event.message === "The user aborted a request." &&
+  (event.stack ?? "").trim() === "";
 const isInjectedServiceWorkerRejection = (
   event: Pick<BeaconEvent, "message" | "stack">,
 ): boolean => {
@@ -1047,6 +1053,7 @@ export const isKnownBeaconNoise = (
     matchesErrorMessage(event, FACEBOOK_IOS_HOST_INJECTION)) ||
   isInstagramIosBridgeInjection(event, userAgent) ||
   isInjectedServiceWorkerRejection(event) ||
+  isStacklessBrowserAbort(event) ||
   isExtensionOnlyStack(event) ||
   (event.name === "TypeError" &&
     event.message === "Failed to fetch" &&
