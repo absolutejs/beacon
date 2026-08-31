@@ -19,101 +19,18 @@
  *     → flush: POST envelope to /ingest via sendBeacon / fetch keepalive
  */
 
+import { BEACON_ATTRIBUTE, BEACON_SIGNAL } from "./contracts";
+export { BEACON_ATTRIBUTE, BEACON_SIGNAL } from "./contracts";
+export type { BeaconSignal } from "./contracts";
+import type { BeaconSignal } from "./contracts";
+
 export type BeaconLevel = "fatal" | "error" | "warning" | "info";
-
-/** Stable names for Beacon's built-in UX and health signals. */
-export const BEACON_SIGNAL = {
-  AUTH_FAILURE_STORM: "auth_failure_storm",
-  BROWSER_INTERVENTION: "browser_intervention",
-  BROWSER_POLICY_VIOLATION: "browser_policy_violation",
-  BFCACHE_BLOCKED: "bfcache_blocked",
-  CAPABILITY_FAILURE: "capability_failure",
-  BLANK_APP_ROOT: "blank_app_root",
-  CONSOLE_ERROR: "console_error",
-  CONTROL_COLLISION: "control_collision",
-  CSP_VIOLATION: "csp_violation",
-  CLIPBOARD_FAILURE: "clipboard_failure",
-  DEAD_CLICK: "dead_click",
-  DISRUPTIVE_LAYOUT_SHIFT: "disruptive_layout_shift",
-  DOCUMENT_DISCARDED: "document_discarded",
-  ERROR_CLICK: "error_click",
-  FETCH_FAILED: "fetch_failed",
-  FOCUS_LOST: "focus_lost",
-  FONT_FAILURE: "font_failure",
-  FORM_FRUSTRATION: "form_frustration",
-  FORM_ABANDONMENT: "form_abandonment",
-  FOCUSED_CONTROL_OFFSCREEN: "focused_control_offscreen",
-  HTTP_5XX: "http_5xx",
-  HTTP_RESPONSE_FAILURE: "http_response_failure",
-  INVISIBLE_TEXT: "invisible_text",
-  EMBEDDED_CONTENT_STALLED: "embedded_content_stalled",
-  LAYOUT_OVERFLOW: "layout_overflow",
-  MAIN_THREAD_STALL: "main_thread_stall",
-  MEDIA_PLAYBACK_FAILED: "media_playback_failed",
-  MEDIA_PLAYBACK_STALLED: "media_playback_stalled",
-  MODAL_FOCUS_ESCAPE: "modal_focus_escape",
-  OCCLUDED_CONTROL: "occluded_control",
-  RAGE_CLICK: "rage_click",
-  RATE_LIMITED: "rate_limited",
-  NAVIGATION_STALLED: "navigation_stalled",
-  RELOAD_LOOP: "reload_loop",
-  REQUEST_STORM: "request_storm",
-  SEMANTIC_RESPONSE_FAILURE: "semantic_response_failure",
-  SCROLL_JAIL: "scroll_jail",
-  SLOW_RESPONSE: "slow_response",
-  SLOW_RESOURCE: "slow_resource",
-  SLOW_INTERACTION: "slow_interaction",
-  SOCKET_ABNORMAL_CLOSE: "socket_abnormal_close",
-  SOCKET_FLAPPING: "socket_flapping",
-  SSE_FLAPPING: "sse_flapping",
-  STALE_RELEASE: "stale_release",
-  STALLED_STREAM: "stalled_stream",
-  STUCK_LOADING: "stuck_loading",
-  THEME_MISMATCH: "theme_mismatch",
-  THRASHED_CURSOR: "thrashed_cursor",
-  STORAGE_FAILURE: "storage_failure",
-  WEBGL_CONTEXT_LOST: "webgl_context_lost",
-  SERVICE_WORKER_FAILURE: "service_worker_failure",
-  WORKER_FAILURE: "worker_failure",
-} as const;
-
-export type BeaconSignal = (typeof BEACON_SIGNAL)[keyof typeof BEACON_SIGNAL];
-
-/** Stable DOM attributes understood by Beacon's instrumentation. */
-export const BEACON_ATTRIBUTE = {
-  /** Names an application root whose settled empty state is a failure. */
-  APP_ROOT: "data-beacon-app-root",
-  /** Groups controls whose intentional near-touching layout should not be
-   * reported as a collision. True border-box overlaps remain reportable. */
-  CONTROL_GROUP: "data-beacon-control-group",
-  DEAD_CLICK: "data-beacon-dead-click",
-  NAME: "data-beacon-name",
-  /** Names an iframe whose initial load should be watched for a stall. */
-  EMBED: "data-beacon-embed",
-  /** Marks loading UI that should participate in the stuck-loading watchdog. */
-  LOADING: "data-beacon-loading",
-  /** Overrides the stuck-loading deadline for one loading element, in ms. */
-  LOADING_TIMEOUT: "data-beacon-loading-timeout",
-  /** Names a form whose dirty navigation should be reported as abandonment. */
-  FORM: "data-beacon-form",
-  /** Names media whose user-visible playback should be watched. */
-  MEDIA: "data-beacon-media",
-  /** `="allow"` exempts an element AND its subtree from layout-overflow
-   * detection — for deliberate bleeds (decorative shapes, marquees). */
-  OVERFLOW: "data-beacon-overflow",
-  /** `="allow"` exempts an element AND its subtree from the visual scan
-   * detectors (occluded controls, invisible text, stuck loading). */
-  SCAN: "data-beacon-scan",
-  /** `="adaptive"` opts a subtree into theme-polarity checks; `="allow"`
-   * exempts an intentional opposite-theme surface and its subtree. */
-  THEME: "data-beacon-theme",
-} as const;
 
 /** Response header used to correlate a browser signal with its server request. */
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.6.61";
+export const BEACON_SDK_VERSION = "0.6.62";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1254,11 +1171,18 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "presentationDelayMs",
   "processingDurationMs",
   "reportDelayMs",
+  "renderDurationMs",
   "responseMs",
   "shiftValue",
   "signal",
+  "scriptCount",
+  "scriptDurationMs",
+  "scriptForcedStyleAndLayoutMs",
+  "scriptPauseDurationMs",
+  "scriptSourceCharPosition",
   "spillPx",
   "stallCount",
+  "styleAndLayoutDurationMs",
   "thresholdMs",
   "userAgent",
   "viewportHeight",
@@ -1266,8 +1190,11 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "windowMs",
 ]);
 
+const BUILT_ASSET_HASH =
+  /([/][A-Za-z0-9_-]+)\.[a-z0-9]{6,16}(\.(?:js|css))\b/giu;
 const normalizeSignalIdentityPart = (value: string): string =>
   value
+    .replace(BUILT_ASSET_HASH, "$1.:asset$2")
     .replace(UUID_PATH_SEGMENT, ":id")
     .replace(LONG_IDENTIFIER_SEGMENT, ":id")
     .slice(0, SIGNAL_IDENTITY_PART_MAX);
@@ -4816,11 +4743,21 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             (entry.value ?? 0) < minimum
           )
             continue;
-          const targets = (entry.sources ?? [])
-            .map(({ node }) =>
-              node instanceof Element ? describeElement(node) : undefined,
+          const sourceElements = (entry.sources ?? [])
+            .map(({ node }) => (node instanceof Element ? node : undefined))
+            .filter((node): node is Element => node !== undefined);
+          if (
+            sourceElements.length > 0 &&
+            sourceElements.every(
+              (node) =>
+                node.closest(`[${BEACON_ATTRIBUTE.LAYOUT_SHIFT}="allow"]`) !==
+                null,
             )
-            .filter((target): target is string => target !== undefined)
+          ) {
+            continue;
+          }
+          const targets = sourceElements
+            .map((node) => describeElement(node))
             .slice(0, 5);
           const key = targets.join(",") || "unknown";
           const framePhase =
@@ -6254,7 +6191,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     typeof window.WebSocket === "function"
   ) {
     const OriginalWebSocket = window.WebSocket;
-    const closesByUrl = new Map<string, number[]>();
+    const closesByUrl = new Map<
+      string,
+      Array<{ at: number; code: number | null; wasClean: boolean | null }>
+    >();
     const reportedSockets = new Set<string>();
     const reportedAbnormalCloses = new Set<string>();
     const recoverableSocket = (url: string): boolean =>
@@ -6306,9 +6246,19 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           if (signals.socketFlapping === false) return;
           const now = Date.now();
           const closes = (closesByUrl.get(label) ?? []).filter(
-            (at) => now - at < SOCKET_FLAP_WINDOW_MS,
+            (close) => now - close.at < SOCKET_FLAP_WINDOW_MS,
           );
-          closes.push(now);
+          closes.push({
+            at: now,
+            code:
+              typeof CloseEvent !== "undefined" && event instanceof CloseEvent
+                ? event.code
+                : null,
+            wasClean:
+              typeof CloseEvent !== "undefined" && event instanceof CloseEvent
+                ? event.wasClean
+                : null,
+          });
           closesByUrl.set(label, closes);
           if (
             closes.length < SOCKET_FLAP_CYCLES ||
@@ -6324,6 +6274,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               endpoint: label,
               signal: BEACON_SIGNAL.SOCKET_FLAPPING,
               windowMs: String(SOCKET_FLAP_WINDOW_MS),
+            },
+            undefined,
+            {
+              closeSamples: closes.map((close) => ({
+                ageMs: now - close.at,
+                code: close.code,
+                wasClean: close.wasClean,
+              })),
             },
           );
         });

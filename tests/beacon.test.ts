@@ -3667,6 +3667,8 @@ describe("ambient watchdog signals", () => {
 
   test("retains detailed long-animation-frame attribution", async () => {
     const original = globalThis.PerformanceObserver;
+    let assetName = "profile.a1b2c3d4.js";
+    let primaryScriptDuration = 260;
     class FakePerformanceObserver {
       private readonly callback: PerformanceObserverCallback;
       constructor(callback: PerformanceObserverCallback) {
@@ -3687,15 +3689,14 @@ describe("ambient watchdog signals", () => {
                   index === 2
                     ? [
                         {
-                          duration: 260,
+                          duration: primaryScriptDuration,
                           forcedStyleAndLayoutDuration: 34,
                           invoker: "BUTTON.onclick",
                           invokerType: "event-listener",
                           pauseDuration: 6,
                           sourceCharPosition: 842,
                           sourceFunctionName: "hydrateProfile",
-                          sourceURL:
-                            "https://app.example/assets/profile.js?token=secret",
+                          sourceURL: `https://app.example/assets/${assetName}?token=secret`,
                           windowAttribution: "self",
                         },
                         { duration: 80 },
@@ -3717,7 +3718,8 @@ describe("ambient watchdog signals", () => {
     try {
       const { beacon, sent } = makeWatchdogBeacon();
       await beacon.flush();
-      expect(signalsSent(sent, "main_thread_stall")[0]?.tags).toMatchObject({
+      const event = signalsSent(sent, "main_thread_stall")[0];
+      expect(event?.tags).toMatchObject({
         firstUIEventAtMs: "2080",
         renderDurationMs: "140",
         scriptAttribution: "available",
@@ -3728,14 +3730,12 @@ describe("ambient watchdog signals", () => {
         scriptInvoker: "BUTTON.onclick",
         scriptInvokerType: "event-listener",
         scriptPauseDurationMs: "6",
-        scriptSource: "/assets/profile.js",
+        scriptSource: "/assets/profile.a1b2c3d4.js",
         scriptSourceCharPosition: "842",
         scriptWindowAttribution: "self",
         styleAndLayoutDurationMs: "70",
       });
-      expect(
-        signalsSent(sent, "main_thread_stall")[0]?.extra?.scriptTimings,
-      ).toEqual([
+      expect(event?.extra?.scriptTimings).toEqual([
         {
           durationMs: 260,
           forcedStyleAndLayoutDurationMs: 34,
@@ -3744,11 +3744,23 @@ describe("ambient watchdog signals", () => {
           pauseDurationMs: 6,
           sourceCharPosition: 842,
           sourceFunctionName: "hydrateProfile",
-          sourceURL: "/assets/profile.js",
+          sourceURL: "/assets/profile.a1b2c3d4.js",
           windowAttribution: "self",
         },
         { durationMs: 80 },
       ]);
+      assetName = "profile.z9y8x7w6.js";
+      primaryScriptDuration = 410;
+      const second = makeWatchdogBeacon();
+      await second.beacon.flush();
+      const secondEvent = signalsSent(second.sent, "main_thread_stall")[0];
+      expect(secondEvent?.tags?.scriptDurationMs).not.toBe(
+        event?.tags?.scriptDurationMs,
+      );
+      expect(secondEvent?.tags?.scriptSource).not.toBe(
+        event?.tags?.scriptSource,
+      );
+      expect(secondEvent?.groupingKey).toBe(event?.groupingKey);
     } finally {
       globalThis.PerformanceObserver = original;
     }
@@ -4141,6 +4153,52 @@ describe("ambient watchdog signals", () => {
       const events = signalsSent(sent, "disruptive_layout_shift");
       expect(events).toHaveLength(1);
       expect(events[0]?.tags?.target).toBe("div.late-banner");
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("ignores layout shifts wholly owned by an intentional dynamic region", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "layout-shift") return;
+        const log = document.createElement("div");
+        log.setAttribute(BEACON_ATTRIBUTE.LAYOUT_SHIFT, "allow");
+        const message = document.createElement("p");
+        log.append(message);
+        document.body.append(log);
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 0,
+                entryType: "layout-shift",
+                hadRecentInput: false,
+                sources: [{ node: message }],
+                value: 0.24,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+        log.remove();
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(0);
     } finally {
       globalThis.PerformanceObserver = original;
     }
@@ -4719,6 +4777,19 @@ describe("ambient watchdog signals", () => {
     const events = signalsSent(sent, "socket_flapping");
     expect(events).toHaveLength(1);
     expect(events[0]?.tags?.endpoint).toBe("/sync/ws");
+    const closeSamples = events[0]?.extra?.closeSamples as
+      | Array<{ ageMs: number; code: number; wasClean: boolean }>
+      | undefined;
+    expect(closeSamples).toHaveLength(4);
+    expect(
+      closeSamples?.every(
+        (sample) =>
+          sample.ageMs >= 0 &&
+          sample.ageMs < 100 &&
+          sample.code === 1006 &&
+          sample.wasClean === false,
+      ),
+    ).toBe(true);
     expect(signalsSent(sent, "socket_abnormal_close")).toHaveLength(0);
     await beacon.close();
     window.WebSocket = original;
