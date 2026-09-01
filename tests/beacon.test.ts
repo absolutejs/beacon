@@ -4778,8 +4778,7 @@ describe("ambient watchdog signals", () => {
     expect(events).toHaveLength(1);
     expect(events[0]?.tags?.endpoint).toBe("/sync/ws");
     const closeSamples = events[0]?.extra?.closeSamples as
-      | Array<{ ageMs: number; code: number; wasClean: boolean }>
-      | undefined;
+      Array<{ ageMs: number; code: number; wasClean: boolean }> | undefined;
     expect(closeSamples).toHaveLength(4);
     expect(
       closeSamples?.every(

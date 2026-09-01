@@ -1,6 +1,6 @@
 {
   "name": "@absolutejs/beacon",
-  "version": "0.6.62",
+  "version": "0.7.0-beta.0",
   "description": "Tiny, zero-dependency browser SDK for the AbsoluteJS observability stack. Captures uncaught errors + unhandled rejections, breadcrumbs (console/click/fetch/history), batches, and POSTs an envelope to @absolutejs/errors/ingest via sendBeacon/keepalive. ~2-5KB gz, no Effect in the browser; end-to-end type-safe via the shared erased envelope contract.",
   "repository": {
     "type": "git",
@@ -27,6 +27,11 @@
       "import": "./dist/contracts.js",
       "default": "./dist/contracts.js"
     },
+    "./policy": {
+      "types": "./dist/policy.d.ts",
+      "import": "./dist/policy.js",
+      "default": "./dist/policy.js"
+    },
     "./manifest": {
       "types": "./dist/manifest.d.ts",
       "import": "./dist/manifest.js",
@@ -42,7 +47,7 @@
     "README.md"
   ],
   "scripts": {
-    "build": "rm -rf dist && bun build src/index.ts src/contracts.ts src/manifest.ts --outdir dist --root ./src --sourcemap --target=browser --external @absolutejs/manifest --external '@absolutejs/manifest/*' --external @sinclair/typebox --external '@sinclair/typebox/*' --external web-vitals --external 'web-vitals/*' && tsc --project tsconfig.build.json && absolute-manifest emit",
+    "build": "rm -rf dist && bun build src/index.ts src/contracts.ts src/policy.ts src/manifest.ts --outdir dist --root ./src --sourcemap --target=browser --external @absolutejs/manifest --external '@absolutejs/manifest/*' --external @sinclair/typebox --external '@sinclair/typebox/*' --external web-vitals --external 'web-vitals/*' && tsc --project tsconfig.build.json && absolute-manifest emit",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"./**/*.{ts,json,md}\"",

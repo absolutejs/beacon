@@ -254,6 +254,73 @@ SSR-safe: imported in a non-DOM environment, `createBeacon` returns a no-op.
 Semantic grouping keys require `@absolutejs/errors` 0.7.3 or newer at the
 ingest boundary.
 
+## Noise policy (`@absolutejs/beacon/policy`)
+
+An issue board is only worth opening if everything on it is real. Every
+application that ships Beacon ends up writing the same `beforeSend` filter — and
+most of what goes in it is not application-specific at all: a stale chunk import
+after a deploy, a theme extension rewriting inline styles before hydration, a
+read that failed while the tab was hidden, a 5xx the server already captured
+with a stack. What differs is a handful of endpoints and hostnames.
+
+```ts
+import {
+  createNoisePolicy,
+  createResourceFailurePolicy,
+  reliabilitySignalPreset,
+  BEACON_SIGNAL,
+} from "@absolutejs/beacon/policy";
+
+const isNoise = createNoisePolicy({
+  // Signals these endpoints raise in normal operation: a stream that stays
+  // open for a whole shift, an upload that is megabytes by design.
+  exemptions: [
+    {
+      signals: [BEACON_SIGNAL.SLOW_RESPONSE, BEACON_SIGNAL.FETCH_FAILED],
+      endpoints: ["/sync", "/stream"],
+    },
+    {
+      signals: [BEACON_SIGNAL.SLOW_RESPONSE],
+      endpoints: ["/api/uploads"],
+      methods: ["POST"],
+    },
+  ],
+  // A 5xx from here still reports even when the server captured it: a server
+  // that stopped answering cannot file its own issue.
+  probeEndpoints: ["/api/health"],
+});
+
+initBeacon({
+  // ...
+  signals: reliabilitySignalPreset({
+    behavioural,
+    recoverableSockets: ["/sync"],
+  }),
+  instrument: {
+    resourceErrors: createResourceFailurePolicy({
+      thirdPartyHosts: ["googletagmanager.com", "js.stripe.com"],
+      optionalPathPrefixes: ["/uploads/"],
+    }),
+  },
+  beforeSend: (event) => (isNoise(event) ? null : event),
+});
+```
+
+Built in, each switchable and individually exported: hidden-tab read failures,
+5xx the server already captured, stale releases the app prompts for itself,
+stale chunk imports, theme-extension hydration mismatches, and third-party
+deprecation reports. `rules` takes application-specific predicates.
+
+`reliabilitySignalPreset` turns off the four detectors another system usually
+already owns — browser policy reports (a `report-to` endpoint is canonical),
+document discards, latency (a performance console), stale releases (a service
+worker prompt) — and puts the behavioural detectors behind a consent flag.
+Everything it does not name keeps its Beacon default.
+
+This entry point imports nothing from the SDK at runtime: boot-time policy is
+read by the synchronous page graph, and pulling Beacon's runtime in there makes
+the bundler merge the whole SDK back into it, defeating lazy startup.
+
 ## License
 
 BSL-1.1 with a named carveout against hosted error-tracking / session-replay
