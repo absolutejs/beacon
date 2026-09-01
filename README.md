@@ -65,6 +65,24 @@ beacon.setUser({ id: currentUserId });
 beacon.captureMessage("checkout started", "info");
 ```
 
+### Preserve pre-hydration layout shifts
+
+If Beacon itself is loaded lazily, install its zero-configuration early buffer
+from the synchronous application entry before framework hydration:
+
+```ts
+import { installEarlyLayoutShiftBuffer } from "@absolutejs/beacon/early";
+
+installEarlyLayoutShiftBuffer();
+```
+
+The full Beacon instance consumes this buffer automatically when disruptive
+layout-shift signals are enabled. It retains the entry's original performance
+time, observation time, source rectangles, viewport and document state, plus
+resize and privacy-safe interaction timing. This avoids misclassifying a
+buffered startup entry using only state observed after hydration. The early
+entry point does not initialize Beacon, send telemetry, or import the main SDK.
+
 ## What it does
 
 - **Auto-capture** — `window.onerror` + `unhandledrejection` (toggle via `instrument`).

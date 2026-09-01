@@ -20,6 +20,11 @@
  */
 
 import { BEACON_ATTRIBUTE, BEACON_SIGNAL } from "./contracts";
+import {
+  consumeEarlyLayoutShiftBuffer,
+  type EarlyLayoutShiftSource,
+  type EarlyLayoutShiftViewport,
+} from "./early";
 export { BEACON_ATTRIBUTE, BEACON_SIGNAL } from "./contracts";
 export type { BeaconSignal } from "./contracts";
 import type { BeaconSignal } from "./contracts";
@@ -30,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.1";
+export const BEACON_SDK_VERSION = "0.7.0-beta.2";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -481,6 +486,8 @@ export type WebVital = {
   navigationType: string;
   /** Beacon project identifier, used by authenticated relays for tenant fencing. */
   project: string;
+  /** Per-page Beacon session identifier for cross-signal correlation. */
+  sessionId: string;
   /** Optional application release copied from the Beacon configuration. */
   release?: string;
   /** Optional privacy-masked replay correlation. */
@@ -1162,6 +1169,7 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "closeCount",
   "currentRelease",
   "durationMs",
+  "documentReadyState",
   "elapsedMs",
   "errorCount",
   "focusEventTrusted",
@@ -1170,6 +1178,11 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "interactionAgeMs",
   "lastFocused",
   "loadCount",
+  "layoutShiftBuffered",
+  "layoutShiftObservedAtMs",
+  "layoutShiftObserverStartedAtMs",
+  "layoutShiftSources",
+  "layoutShiftStartTimeMs",
   "newestRelease",
   "obscuredPx",
   "presentationDelayMs",
@@ -1190,6 +1203,15 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "thresholdMs",
   "userAgent",
   "viewportHeight",
+  "viewportDocumentHeight",
+  "viewportDocumentWidth",
+  "viewportInnerHeight",
+  "viewportInnerWidth",
+  "viewportVisualHeight",
+  "viewportVisualOffsetLeft",
+  "viewportVisualOffsetTop",
+  "viewportVisualScale",
+  "viewportVisualWidth",
   "viewportWidth",
   "windowMs",
 ]);
@@ -1791,6 +1813,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             : "needs-improvement",
         ...(options.release === undefined ? {} : { release: options.release }),
         ...(replayId === undefined ? {} : { replayId }),
+        sessionId,
         samplingRate: vitalsOptions.samplingRate ?? 1,
         schemaVersion: vitalsOptions.schemaVersion ?? 1,
         ...(vitalsOptions.sdkVersion === undefined
@@ -4718,7 +4741,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const minimum =
       signals.disruptiveLayoutShiftMin ?? DISRUPTIVE_LAYOUT_SHIFT_DEFAULT_MIN;
     const reported = new Set<string>();
-    let viewportResizeTimes: number[] = [];
+    const earlyBuffer = consumeEarlyLayoutShiftBuffer();
+    let viewportResizeTimes = [...(earlyBuffer?.resizeTimes ?? [])];
+    const earlyInteractionTimes = earlyBuffer?.interactionTimes ?? [];
     const recordViewportResize = (): void => {
       viewportResizeTimes.push(performance.now());
       if (viewportResizeTimes.length > VIEWPORT_RESIZE_HISTORY_LIMIT) {
@@ -4730,101 +4755,208 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     window.addEventListener("resize", recordViewportResize);
     window.visualViewport?.addEventListener("resize", recordViewportResize);
     try {
+      type CapturedLayoutShift = {
+        buffered: boolean;
+        documentReadyState: DocumentReadyState;
+        hadRecentInput: boolean;
+        observedAt: number;
+        observerStartedAt: number;
+        sources: EarlyLayoutShiftSource[];
+        startTime: number;
+        value: number;
+        viewport: EarlyLayoutShiftViewport;
+      };
+      const currentViewport = (): EarlyLayoutShiftViewport => {
+        const visual = window.visualViewport;
+        return {
+          documentHeight: document.documentElement.scrollHeight,
+          documentWidth: document.documentElement.scrollWidth,
+          innerHeight: window.innerHeight,
+          innerWidth: window.innerWidth,
+          ...(visual == null
+            ? {}
+            : {
+                visualHeight: visual.height,
+                visualOffsetLeft: visual.offsetLeft,
+                visualOffsetTop: visual.offsetTop,
+                visualScale: visual.scale,
+                visualWidth: visual.width,
+              }),
+        };
+      };
+      const processLayoutShift = (entry: CapturedLayoutShift): void => {
+        const interactionTimes = [
+          ...earlyInteractionTimes,
+          ...(recentInteraction === undefined
+            ? []
+            : [recentInteraction.performanceAt]),
+        ];
+        const interactionAgeMs = interactionTimes
+          .map((interactionAt) => entry.startTime - interactionAt)
+          .filter((age) => age >= 0)
+          .sort((left, right) => left - right)[0];
+        const beaconSawRecentInput =
+          interactionAgeMs !== undefined &&
+          interactionAgeMs <= LAYOUT_SHIFT_RECENT_INTERACTION_MS;
+        const resizeAdjacent = viewportResizeTimes.some((resizedAt) => {
+          const resizeAgeMs = entry.startTime - resizedAt;
+          return (
+            resizeAgeMs >= 0 &&
+            resizeAgeMs <= LAYOUT_SHIFT_VIEWPORT_RESIZE_SETTLE_MS
+          );
+        });
+        if (
+          entry.hadRecentInput ||
+          beaconSawRecentInput ||
+          resizeAdjacent ||
+          mobileKeyboardViewportActive() ||
+          entry.value < minimum
+        )
+          return;
+        const sourceElements = entry.sources
+          .map(({ node }) => (node instanceof Element ? node : undefined))
+          .filter((node): node is Element => node !== undefined);
+        if (
+          sourceElements.length > 0 &&
+          sourceElements.every(
+            (node) =>
+              node.closest(`[${BEACON_ATTRIBUTE.LAYOUT_SHIFT}="allow"]`) !==
+              null,
+          )
+        )
+          return;
+        const targets = entry.sources
+          .map((source) =>
+            source.node instanceof Element
+              ? describeElement(source.node)
+              : source.target,
+          )
+          .filter((target) => target !== "unknown")
+          .slice(0, 5);
+        const key = targets.join(",") || "unknown";
+        const framePhase =
+          entry.startTime < MAIN_THREAD_STALL_DEFAULT_WINDOW_MS
+            ? "startup"
+            : "runtime";
+        const interactionProvenance =
+          key === "unknown" &&
+          recentInteraction !== undefined &&
+          interactionAgeMs !== undefined &&
+          interactionAgeMs <= LAYOUT_SHIFT_INTERACTION_PROVENANCE_MS
+            ? recentInteraction
+            : undefined;
+        const reportKey =
+          key === "unknown"
+            ? [
+                key,
+                framePhase,
+                interactionProvenance?.type ?? "no-interaction",
+                interactionProvenance?.target ?? "unknown",
+              ].join("|")
+            : key;
+        if (reported.has(reportKey)) return;
+        reported.add(reportKey);
+        emitSignal(
+          `Disruptive layout shift — ${key} — ${shortUrl(location.href)}`,
+          {
+            documentReadyState: entry.documentReadyState,
+            ...(key === "unknown"
+              ? {
+                  framePhase,
+                  ...(interactionProvenance === undefined
+                    ? {}
+                    : {
+                        interactionAgeMs: String(
+                          Math.round(interactionAgeMs ?? 0),
+                        ),
+                        interactionTarget: interactionProvenance.target,
+                        interactionType: interactionProvenance.type,
+                      }),
+                }
+              : {}),
+            layoutShiftBuffered: String(entry.buffered),
+            layoutShiftObservedAtMs: String(Math.round(entry.observedAt)),
+            layoutShiftObserverStartedAtMs: String(
+              Math.round(entry.observerStartedAt),
+            ),
+            layoutShiftSources: JSON.stringify(
+              entry.sources.map(({ currentRect, previousRect, target }) => ({
+                currentRect,
+                previousRect,
+                target,
+              })),
+            ),
+            layoutShiftStartTimeMs: String(Math.round(entry.startTime)),
+            shiftValue: String(entry.value),
+            signal: BEACON_SIGNAL.DISRUPTIVE_LAYOUT_SHIFT,
+            target: key,
+            viewportDocumentHeight: String(entry.viewport.documentHeight),
+            viewportDocumentWidth: String(entry.viewport.documentWidth),
+            viewportInnerHeight: String(entry.viewport.innerHeight),
+            viewportInnerWidth: String(entry.viewport.innerWidth),
+            ...(entry.viewport.visualHeight === undefined
+              ? {}
+              : {
+                  viewportVisualHeight: String(entry.viewport.visualHeight),
+                  viewportVisualOffsetLeft: String(
+                    entry.viewport.visualOffsetLeft,
+                  ),
+                  viewportVisualOffsetTop: String(
+                    entry.viewport.visualOffsetTop,
+                  ),
+                  viewportVisualScale: String(entry.viewport.visualScale),
+                  viewportVisualWidth: String(entry.viewport.visualWidth),
+                }),
+          },
+        );
+      };
+      for (const entry of earlyBuffer?.entries ?? []) {
+        processLayoutShift({
+          ...entry,
+          buffered: true,
+          observerStartedAt: earlyBuffer?.observerStartedAt ?? 0,
+        });
+      }
+      const observerStartedAt = performance.now();
       const observer = new PerformanceObserver((list) => {
         for (const raw of list.getEntries()) {
           const entry = raw as PerformanceEntry & {
             hadRecentInput?: boolean;
-            sources?: Array<{ node?: Node | null }>;
+            sources?: Array<{
+              currentRect?: DOMRectReadOnly;
+              node?: Node | null;
+              previousRect?: DOMRectReadOnly;
+            }>;
             value?: number;
           };
-          const interactionAgeMs =
-            recentInteraction === undefined
-              ? undefined
-              : entry.startTime - recentInteraction.performanceAt;
-          const beaconSawRecentInput =
-            interactionAgeMs !== undefined &&
-            interactionAgeMs >= 0 &&
-            interactionAgeMs <= LAYOUT_SHIFT_RECENT_INTERACTION_MS;
-          const resizeAdjacent = viewportResizeTimes.some((resizedAt) => {
-            const resizeAgeMs = entry.startTime - resizedAt;
-            return (
-              resizeAgeMs >= 0 &&
-              resizeAgeMs <= LAYOUT_SHIFT_VIEWPORT_RESIZE_SETTLE_MS
-            );
+          const viewport = currentViewport();
+          processLayoutShift({
+            buffered: entry.startTime < observerStartedAt,
+            documentReadyState: document.readyState,
+            hadRecentInput: entry.hadRecentInput === true,
+            observedAt: performance.now(),
+            observerStartedAt,
+            sources: (entry.sources ?? []).map((source) => ({
+              currentRect: source.currentRect,
+              ...(source.node === undefined || source.node === null
+                ? {}
+                : { node: source.node }),
+              previousRect: source.previousRect,
+              target:
+                source.node instanceof Element
+                  ? describeElement(source.node)
+                  : "unknown",
+            })),
+            startTime: entry.startTime,
+            value: entry.value ?? 0,
+            viewport,
           });
-          if (
-            entry.hadRecentInput === true ||
-            beaconSawRecentInput ||
-            resizeAdjacent ||
-            mobileKeyboardViewportActive() ||
-            (entry.value ?? 0) < minimum
-          )
-            continue;
-          const sourceElements = (entry.sources ?? [])
-            .map(({ node }) => (node instanceof Element ? node : undefined))
-            .filter((node): node is Element => node !== undefined);
-          if (
-            sourceElements.length > 0 &&
-            sourceElements.every(
-              (node) =>
-                node.closest(`[${BEACON_ATTRIBUTE.LAYOUT_SHIFT}="allow"]`) !==
-                null,
-            )
-          ) {
-            continue;
-          }
-          const targets = sourceElements
-            .map((node) => describeElement(node))
-            .slice(0, 5);
-          const key = targets.join(",") || "unknown";
-          const framePhase =
-            entry.startTime < MAIN_THREAD_STALL_DEFAULT_WINDOW_MS
-              ? "startup"
-              : "runtime";
-          const interactionProvenance =
-            key === "unknown" &&
-            recentInteraction !== undefined &&
-            interactionAgeMs !== undefined &&
-            interactionAgeMs >= 0 &&
-            interactionAgeMs <= LAYOUT_SHIFT_INTERACTION_PROVENANCE_MS
-              ? recentInteraction
-              : undefined;
-          const reportKey =
-            key === "unknown"
-              ? [
-                  key,
-                  framePhase,
-                  interactionProvenance?.type ?? "no-interaction",
-                  interactionProvenance?.target ?? "unknown",
-                ].join("|")
-              : key;
-          if (reported.has(reportKey)) continue;
-          reported.add(reportKey);
-          emitSignal(
-            `Disruptive layout shift — ${key} — ${shortUrl(location.href)}`,
-            {
-              ...(key === "unknown"
-                ? {
-                    framePhase,
-                    ...(interactionProvenance === undefined
-                      ? {}
-                      : {
-                          interactionAgeMs: String(
-                            Math.round(interactionAgeMs ?? 0),
-                          ),
-                          interactionTarget: interactionProvenance.target,
-                          interactionType: interactionProvenance.type,
-                        }),
-                  }
-                : {}),
-              shiftValue: String(entry.value ?? 0),
-              signal: BEACON_SIGNAL.DISRUPTIVE_LAYOUT_SHIFT,
-              target: key,
-            },
-          );
         }
       });
-      observer.observe({ buffered: true, type: "layout-shift" });
+      observer.observe({
+        buffered: earlyBuffer === undefined,
+        type: "layout-shift",
+      });
       cleanups.push(() => {
         observer.disconnect();
         window.removeEventListener("resize", recordViewportResize);

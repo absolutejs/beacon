@@ -15,6 +15,10 @@ import {
   type WebVital,
   type WebVitalsModule,
 } from "../src/index";
+import {
+  consumeEarlyLayoutShiftBuffer,
+  installEarlyLayoutShiftBuffer,
+} from "../src/early";
 
 const ALL_OFF = {
   clicks: false,
@@ -325,6 +329,7 @@ describe("Core Web Vitals", () => {
       value: 4_500,
     });
     expect(vitals[0]?.at).toBeNumber();
+    expect(vitals[0]?.sessionId).toBeString();
   });
 
   test("bounds TBT to ten seconds from FCP", async () => {
@@ -4186,6 +4191,70 @@ describe("ambient watchdog signals", () => {
       expect(events).toHaveLength(1);
       expect(events[0]?.tags?.target).toBe("div.late-banner");
     } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("consumes pre-hydration shifts with original timing and geometry", async () => {
+    const original = globalThis.PerformanceObserver;
+    let layoutObserverCount = 0;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "layout-shift") return;
+        layoutObserverCount += 1;
+        if (layoutObserverCount !== 1) return;
+        const hero = document.createElement("div");
+        hero.className = "hero-content";
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 0,
+                entryType: "layout-shift",
+                hadRecentInput: false,
+                sources: [
+                  {
+                    currentRect: rectOf(20, 220, 80, 180),
+                    node: hero,
+                    previousRect: rectOf(20, 220, 40, 140),
+                  },
+                ],
+                startTime: 42,
+                value: 0.18,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      installEarlyLayoutShiftBuffer();
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      const events = signalsSent(sent, "disruptive_layout_shift");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        layoutShiftBuffered: "true",
+        layoutShiftStartTimeMs: "42",
+        target: "div.hero-content",
+      });
+      expect(events[0]?.tags?.layoutShiftSources).toContain(
+        '"previousRect":{"bottom":140',
+      );
+      expect(layoutObserverCount).toBe(2);
+    } finally {
+      consumeEarlyLayoutShiftBuffer();
       globalThis.PerformanceObserver = original;
     }
   });
