@@ -3399,7 +3399,39 @@ describe("ambient watchdog signals", () => {
     dialog.remove();
     await new Promise((resolve) => setTimeout(resolve, 20));
     await beacon.flush();
-    expect(signalsSent(sent, "focus_lost")).toHaveLength(1);
+    const events = signalsSent(sent, "focus_lost");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.tags).toMatchObject({
+      automation: "webdriver",
+      dialog: "div",
+      focusEventTrusted: "false",
+      lastFocused: "button",
+    });
+  });
+
+  test("groups focus loss by dialog instead of the removed control", async () => {
+    const captureFocusLoss = async (buttonClass: string) => {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const dialog = document.createElement("div");
+      dialog.className = "settings-dialog";
+      dialog.setAttribute("role", "dialog");
+      const button = document.createElement("button");
+      button.className = buttonClass;
+      dialog.append(button);
+      document.body.append(dialog);
+      button.focus();
+      button.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      dialog.remove();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await beacon.flush();
+
+      return signalsSent(sent, "focus_lost")[0];
+    };
+
+    const analytics = await captureFocusLoss("analytics-toggle");
+    const marketing = await captureFocusLoss("marketing-toggle");
+    expect(analytics?.groupingKey).toBe(marketing?.groupingKey);
+    expect(analytics?.tags?.lastFocused).not.toBe(marketing?.tags?.lastFocused);
   });
 
   test("does not reuse stale dialog focus for an unrelated focusout", async () => {

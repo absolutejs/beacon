@@ -30,7 +30,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.0";
+export const BEACON_SDK_VERSION = "0.7.0-beta.1";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1152,6 +1152,8 @@ const UUID_PATH_SEGMENT =
 const LONG_IDENTIFIER_SEGMENT = /\b(?:[0-9a-f]{16,}|\d{8,})\b/giu;
 const VOLATILE_SIGNAL_TAGS = new Set([
   "actionId",
+  "actionTrusted",
+  "automation",
   "attemptCount",
   "blockingDurationMs",
   "blockingFrameDurationMs",
@@ -1162,9 +1164,11 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "durationMs",
   "elapsedMs",
   "errorCount",
+  "focusEventTrusted",
   "inputDelayMs",
   "interactionId",
   "interactionAgeMs",
+  "lastFocused",
   "loadCount",
   "newestRelease",
   "obscuredPx",
@@ -1857,13 +1861,25 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   let user: { id?: string; email?: string } | undefined;
   let actionSequence = 0;
   let activeAction:
-    { at: number; id: string; target: string; type: string } | undefined;
-  const beginAction = (type: string, target: string): void => {
+    | {
+        at: number;
+        id: string;
+        target: string;
+        trusted: boolean;
+        type: string;
+      }
+    | undefined;
+  const beginAction = (
+    type: string,
+    target: string,
+    trusted: boolean,
+  ): void => {
     actionSequence += 1;
     activeAction = {
       at: Date.now(),
       id: `${sessionId}:${actionSequence}`,
       target,
+      trusted,
       type,
     };
   };
@@ -1915,6 +1931,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         : {
             actionId: action.id,
             actionTarget: action.target,
+            actionTrusted: String(action.trusted),
             actionType: action.type,
           }),
       ...event.tags,
@@ -3417,7 +3434,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const target = event.target;
       if (!(target instanceof Element)) return;
       const targetName = describeElement(target);
-      beginAction("click", targetName);
+      beginAction("click", targetName, event.isTrusted);
       addBreadcrumb({ message: targetName, type: "click" });
       if (signals === null) return;
       recentInteraction = {
@@ -3494,7 +3511,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const onInteractionSubmit = (event: Event): void => {
       if (!(event.target instanceof HTMLFormElement)) return;
       const target = describeElement(event.target);
-      beginAction("submit", target);
+      beginAction("submit", target, event.isTrusted);
       recentInteraction = {
         at: Date.now(),
         performanceAt: performance.now(),
@@ -3507,7 +3524,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const target = event.target;
       if (!(target instanceof Element)) return;
       const targetName = describeElement(target);
-      beginAction("keyboard", targetName);
+      beginAction("keyboard", targetName, event.isTrusted);
       recentInteraction = {
         at: Date.now(),
         performanceAt: performance.now(),
@@ -5801,21 +5818,29 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       };
       const onFocusOut = (event: FocusEvent): void => {
         const target = event.target;
-        const candidate =
-          target instanceof Element && target.closest(DIALOG_SELECTOR) !== null
-            ? target
-            : null;
-        if (candidate === null) return;
+        if (!(target instanceof Element)) return;
+        const dialog = target.closest(DIALOG_SELECTOR);
+        if (dialog === null) return;
+        const dialogDescriptor = describeElement(dialog);
+        const focusEventTrusted = event.isTrusted === true;
         setTimeout(() => {
           const active = document.activeElement;
           const focusDropped = active === null || active === document.body;
-          if (!focusDropped || candidate.isConnected) return;
-          const descriptor = describeElement(candidate);
+          if (!focusDropped || target.isConnected) return;
+          const descriptor = describeElement(target);
           if (reportedFocusLoss.has(descriptor)) return;
           reportedFocusLoss.add(descriptor);
           emitSignal(
             `Focus lost — a dialog closed and dropped keyboard focus on body — ${shortUrl(location.href)}`,
-            { lastFocused: descriptor, signal: BEACON_SIGNAL.FOCUS_LOST },
+            {
+              dialog: dialogDescriptor,
+              focusEventTrusted: String(focusEventTrusted),
+              lastFocused: descriptor,
+              signal: BEACON_SIGNAL.FOCUS_LOST,
+              ...(navigator.webdriver === true
+                ? { automation: "webdriver" }
+                : {}),
+            },
           );
         }, 0);
       };
