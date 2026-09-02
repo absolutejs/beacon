@@ -4409,6 +4409,77 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("suppresses only the bounded SPA navigation settling window", async () => {
+    const originalObserver = globalThis.PerformanceObserver;
+    const originalUrl = location.href;
+    let callback: PerformanceObserverCallback | undefined;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(next: PerformanceObserverCallback) {
+        this.callback = next;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type === "layout-shift") callback = this.callback;
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      location.href = "https://app.test/current";
+      const { beacon, sent } = makeWatchdogBeacon({
+        instrument: { ...ALL_OFF, history: true },
+      });
+      const from = location.pathname;
+      history.pushState(null, "", "/layout-shift-route");
+      const navigationAt = performance.now();
+      const shifted = document.createElement("section");
+      shifted.className = "route-content";
+      const observer = new FakePerformanceObserver(() => undefined);
+      const reportAt = (ageMs: number): void => {
+        callback?.(
+          {
+            getEntries: () => [
+              {
+                duration: 0,
+                entryType: "layout-shift",
+                hadRecentInput: false,
+                sources: [{ node: shifted }],
+                startTime: navigationAt + ageMs,
+                value: 0.18,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          observer as unknown as PerformanceObserver,
+        );
+      };
+
+      reportAt(600);
+      await beacon.flush();
+      expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(0);
+
+      reportAt(2001);
+      await beacon.flush();
+      const events = signalsSent(sent, "disruptive_layout_shift");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        navigationFrom: from,
+        navigationTo: "/layout-shift-route",
+        navigationType: "pushState",
+        target: "section.route-content",
+      });
+      expect(Number(events[0]?.tags?.navigationAgeMs)).toBeGreaterThanOrEqual(
+        2000,
+      );
+    } finally {
+      location.href = originalUrl;
+      globalThis.PerformanceObserver = originalObserver;
+    }
+  });
+
   test("groups unknown layout shifts by stable lifecycle and interaction provenance", async () => {
     const original = globalThis.PerformanceObserver;
     let callback: PerformanceObserverCallback | undefined;

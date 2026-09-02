@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.3";
+export const BEACON_SDK_VERSION = "0.7.0-beta.4";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1184,6 +1184,10 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "layoutShiftSources",
   "layoutShiftStartTimeMs",
   "newestRelease",
+  "navigationAgeMs",
+  "navigationFrom",
+  "navigationTo",
+  "navigationType",
   "obscuredPx",
   "presentationDelayMs",
   "processingDurationMs",
@@ -1649,6 +1653,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const FORM_FRUSTRATION_THRESHOLD = 3;
   const FORM_FRUSTRATION_WINDOW_MS = 60000;
   const LAYOUT_SHIFT_RECENT_INTERACTION_MS = 500;
+  // Route components and their first data responses commonly settle just
+  // beyond the Layout Instability API's 500ms recent-input window. They are an
+  // accepted navigation response, not a spontaneous shift on the current UI.
+  const LAYOUT_SHIFT_SPA_NAVIGATION_SETTLE_MS = 2000;
   const LAYOUT_SHIFT_INTERACTION_PROVENANCE_MS = 10000;
   const LAYOUT_SHIFT_VIEWPORT_RESIZE_SETTLE_MS = 500;
   const VIEWPORT_RESIZE_HISTORY_LIMIT = 8;
@@ -1689,6 +1697,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         performanceAt: number;
         target: string;
         type: "click" | "submit" | "keyboard";
+      }
+    | undefined;
+  let recentNavigation:
+    | {
+        from: string;
+        performanceAt: number;
+        to: string;
+        type: "popstate" | "pushState" | "replaceState";
       }
     | undefined;
   let reportErrorClick: ((errorName: string) => void) | null = null;
@@ -4798,6 +4814,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         const beaconSawRecentInput =
           interactionAgeMs !== undefined &&
           interactionAgeMs <= LAYOUT_SHIFT_RECENT_INTERACTION_MS;
+        const navigationAgeMs =
+          recentNavigation === undefined
+            ? undefined
+            : entry.startTime - recentNavigation.performanceAt;
+        const navigationSettling =
+          navigationAgeMs !== undefined &&
+          navigationAgeMs >= 0 &&
+          navigationAgeMs <= LAYOUT_SHIFT_SPA_NAVIGATION_SETTLE_MS;
         const resizeAdjacent = viewportResizeTimes.some((resizedAt) => {
           const resizeAgeMs = entry.startTime - resizedAt;
           return (
@@ -4808,6 +4832,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         if (
           entry.hadRecentInput ||
           beaconSawRecentInput ||
+          navigationSettling ||
           resizeAdjacent ||
           mobileKeyboardViewportActive() ||
           entry.value < minimum
@@ -4874,6 +4899,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                       }),
                 }
               : {}),
+            ...(recentNavigation === undefined ||
+            navigationAgeMs === undefined ||
+            navigationAgeMs < 0 ||
+            navigationAgeMs > LAYOUT_SHIFT_INTERACTION_PROVENANCE_MS
+              ? {}
+              : {
+                  navigationAgeMs: String(Math.round(navigationAgeMs)),
+                  navigationFrom: recentNavigation.from,
+                  navigationTo: recentNavigation.to,
+                  navigationType: recentNavigation.type,
+                }),
             layoutShiftBuffered: String(entry.buffered),
             layoutShiftObservedAtMs: String(Math.round(entry.observedAt)),
             layoutShiftObserverStartedAtMs: String(
@@ -7361,11 +7397,20 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
   if (instrument.history !== false && typeof history !== "undefined") {
     let recordedHistoryUrl = location.href;
-    const record = (): void => {
+    const record = (
+      from: string,
+      type: "popstate" | "pushState" | "replaceState",
+    ): void => {
       addBreadcrumb({
         message: `navigate ${location.pathname}${location.search}`,
         type: "navigation",
       });
+      recentNavigation = {
+        from: shortUrl(from),
+        performanceAt: performance.now(),
+        to: shortUrl(location.href),
+        type,
+      };
       recordedHistoryUrl = location.href;
       // The new route's layout deserves the same overflow check as a resize.
       overflowScanOnNavigation?.();
@@ -7394,7 +7439,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         const result = original(...args);
         if (!changesUrl) return result;
         reportFormAbandonmentOnNavigation?.(departedUrl);
-        record();
+        record(departedUrl, key);
         return result;
       };
       return () => {
@@ -7405,7 +7450,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const onPopState = (): void => {
       if (location.href === recordedHistoryUrl) return;
       reportFormAbandonmentOnNavigation?.(recordedHistoryUrl);
-      record();
+      record(recordedHistoryUrl, "popstate");
     };
     window.addEventListener("popstate", onPopState);
     cleanups.push(() => window.removeEventListener("popstate", onPopState));

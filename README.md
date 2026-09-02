@@ -225,7 +225,10 @@ entry point does not initialize Beacon, send telemetry, or import the main SDK.
   Instability names shifted elements. When the browser supplies no shifted
   node, Beacon retains startup/runtime phase plus recent interaction type,
   target, and age; stable provenance separates issue grouping while volatile
-  age remains diagnostic-only. Successful HTTP responses can be
+  age remains diagnostic-only. Layout shifts during the first two seconds after
+  an accepted `pushState`, `replaceState`, or `popstate` route change are treated
+  as route settling; later shifts retain navigation type, source, destination,
+  and age for diagnosis. Successful HTTP responses can be
   classified through the host-owned `instrument.classifyResponse` callback for
   GraphQL-style errors. Selected HTTP 4xx/5xx responses can be promoted through
   the opt-in `instrument.classifyErrorResponse` callback when application context
