@@ -4994,6 +4994,78 @@ describe("ambient watchdog signals", () => {
     window.WebSocket = original;
   });
 
+  test("does not count clean or service-restart WebSocket closes as flapping", async () => {
+    class FakeWebSocket extends EventTarget {
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {}
+    }
+    const original = window.WebSocket;
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const { beacon, sent } = makeWatchdogBeacon();
+    for (const code of [1000, 1001, 1012, 1005]) {
+      for (let index = 0; index < 4; index += 1) {
+        const socket = new window.WebSocket("wss://app.test/sync/ws");
+        socket.dispatchEvent(
+          new CloseEvent("close", { code, wasClean: code === 1005 }),
+        );
+      }
+    }
+    await beacon.flush();
+    expect(signalsSent(sent, "socket_flapping")).toHaveLength(0);
+    expect(signalsSent(sent, "socket_abnormal_close")).toHaveLength(0);
+    await beacon.close();
+    window.WebSocket = original;
+  });
+
+  test("suppresses ambient watchdog signals in automated browsers", async () => {
+    class FakeWebSocket extends EventTarget {
+      url: string;
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+      }
+      close(): void {}
+    }
+    const originalSocket = window.WebSocket;
+    const webdriver = Object.getOwnPropertyDescriptor(navigator, "webdriver");
+    window.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    Object.defineProperty(navigator, "webdriver", {
+      configurable: true,
+      value: true,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: {
+          layoutOverflowSettleMs: 0,
+          suppressAutomatedBrowsers: true,
+        },
+      });
+      for (let index = 0; index < 4; index += 1) {
+        const socket = new window.WebSocket("wss://app.test/sync/ws");
+        socket.dispatchEvent(
+          new CloseEvent("close", { code: 1006, wasClean: false }),
+        );
+      }
+      await beacon.flush();
+      expect(sent).toHaveLength(0);
+      beacon.captureMessage("explicit automation diagnostic", "warning");
+      await beacon.flush();
+      expect(sent).toHaveLength(1);
+      await beacon.close();
+    } finally {
+      window.WebSocket = originalSocket;
+      if (webdriver === undefined) {
+        Reflect.deleteProperty(navigator, "webdriver");
+      } else {
+        Object.defineProperty(navigator, "webdriver", webdriver);
+      }
+    }
+  });
+
   test("does not count application-initiated WebSocket closes", async () => {
     class FakeWebSocket extends EventTarget {
       url: string;

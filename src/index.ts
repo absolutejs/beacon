@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.5";
+export const BEACON_SDK_VERSION = "0.7.0-beta.6";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -167,6 +167,9 @@ export type BeaconResourceFailure = {
  * `console.error`. Each detector is feature-gated and independently tunable.
  */
 export type BeaconSignals = {
+  /** Suppress synthetic watchdog findings while `navigator.webdriver` is true.
+   * Explicit exceptions and messages are unaffected. Default false. */
+  suppressAutomatedBrowsers?: boolean;
   /** Back/forward navigations the browser could not restore from bfcache. */
   bfcacheBlocks?: boolean;
   /** Browser-specific bfcache reason strings that are inherent to an
@@ -2056,6 +2059,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     fallbackFramesToDrop = 1,
     useDefaultFingerprint = false,
   ): void => {
+    // Browser automation is useful for exercising production, but watchdog
+    // findings from that synthetic session are not production-user incidents.
+    // Explicitly captured exceptions and messages still flow through Beacon.
+    if (
+      signals?.suppressAutomatedBrowsers === true &&
+      typeof navigator !== "undefined" &&
+      navigator.webdriver === true
+    )
+      return;
     // A reload loop is evidence about the page lifecycle itself, including a
     // stale page repeatedly reloading before it can reach the current bundle.
     // Keep it reportable while suppressing ordinary ambient findings from an
@@ -6415,6 +6427,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             Date.now() - pageRestoredAt <= RESTORED_SOCKET_CLOSE_GRACE_MS;
           if (pageLifecycleEnding || applicationClose || restoredLifecycleClose)
             return;
+          const expectedServerClose =
+            typeof CloseEvent !== "undefined" &&
+            event instanceof CloseEvent &&
+            (event.wasClean ||
+              event.code === 1000 ||
+              event.code === 1001 ||
+              event.code === 1012);
+          // Clean closes and service restarts are normal lifecycle events, not
+          // reconnect flapping. A real transport failure (for example 1006)
+          // remains eligible for both abnormal-close and flap detection.
+          if (expectedServerClose) return;
           if (
             signals.socketAbnormalCloses !== false &&
             typeof CloseEvent !== "undefined" &&
