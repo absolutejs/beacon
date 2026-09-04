@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.7";
+export const BEACON_SDK_VERSION = "0.7.0-beta.8";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1271,7 +1271,7 @@ const signalGroupingKey = (
 const AUTOMATED_BROWSER_USER_AGENT =
   /(?:\b(?:adsbot|bingbot|crawler|googlebot|headlesschrome|lighthouse|pagespeed|spider)\b|\b(?:bot|crawl|spider)\/)/iu;
 
-const isAutomatedBrowser = (): boolean =>
+export const isAutomatedBrowser = (): boolean =>
   typeof navigator !== "undefined" &&
   (navigator.webdriver === true ||
     AUTOMATED_BROWSER_USER_AGENT.test(navigator.userAgent));
