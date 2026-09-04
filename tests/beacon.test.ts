@@ -3675,6 +3675,11 @@ describe("ambient watchdog signals", () => {
   test("reports repeated visible main-thread stalls", async () => {
     const original = globalThis.PerformanceObserver;
     let durations = [210, 240, 280];
+    let scripts: Array<{
+      duration: number;
+      invoker: string;
+      sourceURL: string;
+    }> = [];
     class FakePerformanceObserver {
       private readonly callback: PerformanceObserverCallback;
       constructor(callback: PerformanceObserverCallback) {
@@ -3691,6 +3696,7 @@ describe("ambient watchdog signals", () => {
                     blockingDuration: duration,
                     duration,
                     entryType: "long-animation-frame",
+                    scripts,
                     startTime: index * 1_000,
                   }) as unknown as PerformanceEntry,
               ),
@@ -3725,6 +3731,21 @@ describe("ambient watchdog signals", () => {
       expect(secondEvents).toHaveLength(1);
       expect(secondEvents[0]?.tags?.blockingDurationMs).toBe("830");
       expect(secondEvents[0]?.groupingKey).toBe(events[0]?.groupingKey);
+      scripts = [
+        {
+          duration: 400,
+          invoker: "https://app.test/assets/home.abcdef12.js",
+          sourceURL: "https://app.test/assets/home.abcdef12.js",
+        },
+      ];
+      const attributed = makeWatchdogBeacon();
+      await attributed.beacon.flush();
+      const attributedEvents = signalsSent(
+        attributed.sent,
+        "main_thread_stall",
+      );
+      expect(attributedEvents[0]?.tags?.scriptAttribution).toBe("available");
+      expect(attributedEvents[0]?.groupingKey).toBe(events[0]?.groupingKey);
     } finally {
       globalThis.PerformanceObserver = original;
     }
@@ -4284,6 +4305,58 @@ describe("ambient watchdog signals", () => {
     } finally {
       consumeEarlyLayoutShiftBuffer();
       globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("ignores buffered layout construction before first contentful paint", async () => {
+    const originalObserver = globalThis.PerformanceObserver;
+    const originalGetEntriesByName = performance.getEntriesByName;
+    let layoutObserverCount = 0;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "layout-shift") return;
+        layoutObserverCount += 1;
+        if (layoutObserverCount !== 1) return;
+        this.callback(
+          {
+            getEntries: () => [
+              {
+                duration: 0,
+                entryType: "layout-shift",
+                hadRecentInput: false,
+                sources: [],
+                startTime: 42,
+                value: 0.18,
+              } as unknown as PerformanceEntry,
+            ],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    performance.getEntriesByName = ((name: string) =>
+      name === "first-contentful-paint"
+        ? ([{ startTime: 100 }] as PerformanceEntry[])
+        : []) as typeof performance.getEntriesByName;
+    try {
+      installEarlyLayoutShiftBuffer();
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(signalsSent(sent, "disruptive_layout_shift")).toHaveLength(0);
+    } finally {
+      consumeEarlyLayoutShiftBuffer();
+      performance.getEntriesByName = originalGetEntriesByName;
+      globalThis.PerformanceObserver = originalObserver;
     }
   });
 
@@ -5062,6 +5135,35 @@ describe("ambient watchdog signals", () => {
         Reflect.deleteProperty(navigator, "webdriver");
       } else {
         Object.defineProperty(navigator, "webdriver", webdriver);
+      }
+    }
+  });
+
+  test("suppresses ambient watchdog signals for explicit crawler user agents", async () => {
+    const userAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      value: "Mozilla/5.0 Chrome/146.0.0.0 HeadlessChrome/146.0.0.0",
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: {
+          suppressAutomatedBrowsers: true,
+        },
+      });
+      beacon.captureMessage("explicit automation diagnostic", "warning");
+      window.dispatchEvent(new Event("offline"));
+      await beacon.flush();
+      expect(sent.flatMap((batch) => batch.events)).toHaveLength(1);
+      expect(sent[0]?.events[0]?.message).toBe(
+        "explicit automation diagnostic",
+      );
+      await beacon.close();
+    } finally {
+      if (userAgent === undefined) {
+        Reflect.deleteProperty(navigator, "userAgent");
+      } else {
+        Object.defineProperty(navigator, "userAgent", userAgent);
       }
     }
   });

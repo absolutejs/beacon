@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.6";
+export const BEACON_SDK_VERSION = "0.7.0-beta.7";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -167,8 +167,9 @@ export type BeaconResourceFailure = {
  * `console.error`. Each detector is feature-gated and independently tunable.
  */
 export type BeaconSignals = {
-  /** Suppress synthetic watchdog findings while `navigator.webdriver` is true.
-   * Explicit exceptions and messages are unaffected. Default false. */
+  /** Suppress synthetic watchdog findings for WebDriver and explicitly
+   * identified crawler/audit user agents. Explicit exceptions and messages
+   * are unaffected. Default false. */
   suppressAutomatedBrowsers?: boolean;
   /** Back/forward navigations the browser could not restore from bfcache. */
   bfcacheBlocks?: boolean;
@@ -1199,11 +1200,17 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "responseMs",
   "shiftValue",
   "signal",
+  "scriptAttribution",
   "scriptCount",
   "scriptDurationMs",
+  "scriptFunction",
   "scriptForcedStyleAndLayoutMs",
+  "scriptInvoker",
+  "scriptInvokerType",
   "scriptPauseDurationMs",
+  "scriptSource",
   "scriptSourceCharPosition",
+  "scriptWindowAttribution",
   "spillPx",
   "stallCount",
   "styleAndLayoutDurationMs",
@@ -1260,6 +1267,14 @@ const signalGroupingKey = (
     stableIdentityHash(identity, 0x9e3779b9);
   return `beacon-signal:${signalTags.signal}:${hash}`;
 };
+
+const AUTOMATED_BROWSER_USER_AGENT =
+  /(?:\b(?:adsbot|bingbot|crawler|googlebot|headlesschrome|lighthouse|pagespeed|spider)\b|\b(?:bot|crawl|spider)\/)/iu;
+
+const isAutomatedBrowser = (): boolean =>
+  typeof navigator !== "undefined" &&
+  (navigator.webdriver === true ||
+    AUTOMATED_BROWSER_USER_AGENT.test(navigator.userAgent));
 
 // An anchor whose click does something invisible to us (new tab / download /
 // off-site nav) — so "nothing changed on this page" doesn't make it "dead".
@@ -2064,8 +2079,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     // Explicitly captured exceptions and messages still flow through Beacon.
     if (
       signals?.suppressAutomatedBrowsers === true &&
-      typeof navigator !== "undefined" &&
-      navigator.webdriver === true
+      isAutomatedBrowser()
     )
       return;
     // A reload loop is evidence about the page lifecycle itself, including a
@@ -4813,6 +4827,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         };
       };
       const processLayoutShift = (entry: CapturedLayoutShift): void => {
+        const firstContentfulPaint = performance.getEntriesByName(
+          "first-contentful-paint",
+        )[0]?.startTime;
+        // A buffered entry completed before the browser's first contentful
+        // paint describes initial style/layout construction, not movement a
+        // person could have seen. Cold renderers otherwise turn the initial
+        // SSR stylesheet application into a deterministic false incident.
+        if (
+          firstContentfulPaint !== undefined &&
+          entry.startTime < firstContentfulPaint
+        )
+          return;
         const interactionTimes = [
           ...earlyInteractionTimes,
           ...(recentInteraction === undefined
