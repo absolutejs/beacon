@@ -1426,6 +1426,34 @@ describe("auto-instrumentation", () => {
     ).toBe(true);
   });
 
+  test("drops extension-only errors with Beacon cause separators", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Failed to connect to MetaMask",
+        name: "i",
+        stack:
+          "i: Failed to connect to MetaMask\n" +
+          "    at Object.connect (chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/scripts/inpage.js:7:84292)\n" +
+          "Caused by: Error: MetaMask extension not found\n" +
+          "    at chrome-extension://nkbihfbeogaeaoehlefnkodbefgpgknn/scripts/inpage.js:4:42708",
+      }),
+    ).toBe(true);
+  });
+
+  test("preserves caused errors containing an application frame", () => {
+    expect(
+      isKnownBeaconNoise({
+        message: "Application failed",
+        name: "Error",
+        stack:
+          "Error: Application failed\n" +
+          "    at injected (chrome-extension://extension-id/content.js:1:1)\n" +
+          "Caused by: Error: save failed\n" +
+          "    at save (https://example.com/app.js:20:4)",
+      }),
+    ).toBe(false);
+  });
+
   test("does not synthesize an error-click for a filtered extension error", async () => {
     const { beacon, sent } = make({
       instrument: { ...ALL_OFF, clicks: true, globalErrors: true },

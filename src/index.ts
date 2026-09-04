@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.4";
+export const BEACON_SDK_VERSION = "0.7.0-beta.5";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -921,12 +921,16 @@ const KNOWN_CRAWLER_USER_AGENT =
 const GOOGLE_WEB_RENDERER_SERVICE_WORKER_WRAPPER =
   "wrsParams.serviceWorkers.navigator.serviceWorker.register";
 const EXTENSION_STACK_PROTOCOL = /(?:chrome|moz|safari-web)-extension:\/\//u;
-const isExtensionOnlyStack = (event: Pick<BeaconEvent, "stack">): boolean => {
-  const frames = (event.stack ?? "")
+const stackFrames = (stack: string | undefined) =>
+  (stack ?? "")
     .split("\n")
-    .slice(1)
     .map((line) => line.trim())
-    .filter(Boolean);
+    .filter(
+      (line) =>
+        line.startsWith("at ") || /@(?:[a-z][a-z\d+.-]*:)?\/\//iu.test(line),
+    );
+const isExtensionOnlyStack = (event: Pick<BeaconEvent, "stack">): boolean => {
+  const frames = stackFrames(event.stack);
 
   return (
     frames.length > 0 &&
@@ -936,11 +940,7 @@ const isExtensionOnlyStack = (event: Pick<BeaconEvent, "stack">): boolean => {
 const isExtensionInjectedStack = (
   event: Pick<BeaconEvent, "stack">,
 ): boolean => {
-  const firstFrame = (event.stack ?? "")
-    .split("\n")
-    .slice(1)
-    .map((line) => line.trim())
-    .find(Boolean);
+  const [firstFrame] = stackFrames(event.stack);
 
   return firstFrame !== undefined && EXTENSION_STACK_PROTOCOL.test(firstFrame);
 };
