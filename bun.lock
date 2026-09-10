@@ -5,11 +5,12 @@
     "": {
       "name": "@absolutejs/beacon",
       "dependencies": {
-        "@absolutejs/manifest": "0.7.2",
+        "@absolutejs/manifest": "0.9.0",
         "@sinclair/typebox": "0.34.52",
       },
       "devDependencies": {
-        "@absolutejs/errors": "0.7.3",
+        "@absolutejs/changelog": "^0.1.2",
+        "@absolutejs/errors": "0.9.0",
         "@happy-dom/global-registrator": "20.11.1",
         "@types/bun": "1.3.14",
         "effect": "3.22.0",
@@ -26,11 +27,13 @@
     },
   },
   "packages": {
-    "@absolutejs/errors": ["@absolutejs/errors@0.7.3", "", { "dependencies": { "@absolutejs/handoff": "0.1.0", "@absolutejs/manifest": "^0.7.2", "@sinclair/typebox": "^0.34.0" }, "peerDependencies": { "@jridgewell/trace-mapping": ">=0.3.31 <0.4", "effect": ">=3.22.0 <4", "elysia": ">=1.4.29 <2" }, "optionalPeers": ["@jridgewell/trace-mapping", "elysia"] }, "sha512-w6JWym/5WsgyiZAFwJ+WtBwhWdc4oyguTKreuh3Ez7tEobSXCOChsnnoZQALYEahr5Kzc3unM4bsttyT1FB82A=="],
+    "@absolutejs/changelog": ["@absolutejs/changelog@0.1.2", "", { "bin": { "absolute-changelog": "dist/cli.js" } }, "sha512-q6gQwkDr0IVdWHzTOT3AaZvPSn0ucNidbjBnAUZ8CSwS3wrCd02YMXuBC8sd0ptpYvCowLnR/QWIpBrNqbn+YA=="],
+
+    "@absolutejs/errors": ["@absolutejs/errors@0.9.0", "", { "dependencies": { "@absolutejs/handoff": "0.1.0", "@absolutejs/manifest": "^0.9.0", "@sinclair/typebox": "^0.34.0" }, "peerDependencies": { "@jridgewell/trace-mapping": ">=0.3.31 <0.4", "effect": ">=3.22.0 <4", "elysia": "^2.0.0-beta.6" }, "optionalPeers": ["@jridgewell/trace-mapping", "elysia"] }, "sha512-YOt07R3kENaPvR0LtK58+Aug44WKTrO5DVTxpJQfJJPmAlZ26e5OUEqvcZZN2GmEZigCQw8mLAzaiBkT3HmYAQ=="],
 
     "@absolutejs/handoff": ["@absolutejs/handoff@0.1.0", "", { "dependencies": { "@absolutejs/manifest": "0.7.2", "@sinclair/typebox": "0.34.52" } }, "sha512-P9Wr2oyYBcj7mriCV4h9zRlLGijee/7DW8USVkl/m4ovql7zpITy547jy6j8+HC5v5Ocs+TVcMYmrROEEBupNg=="],
 
-    "@absolutejs/manifest": ["@absolutejs/manifest@0.7.2", "", { "peerDependencies": { "@sinclair/typebox": ">=0.34.0 <0.35.0" }, "bin": { "absolute-manifest": "dist/cli.js" } }, "sha512-NSVzC4yHbH+n+WCNdWYrpbc+3k5rOfO4X85Ku9VCP8teRaa2VEibp29Cyvg9rQARUGaQjGGTz+l+APqM0+odxg=="],
+    "@absolutejs/manifest": ["@absolutejs/manifest@0.9.0", "", { "peerDependencies": { "@sinclair/typebox": ">=0.34.0 <0.35.0" }, "bin": { "absolute-manifest": "dist/cli.js" } }, "sha512-naNDdwNoWQgJ3HuFbAu1UcOVR7SGpLBJz/seO8MMX32vrxk6esgzY7OB1CL8YDOegtI/EqQfcvnulnP66A9aGg=="],
 
     "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.11.1", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^20.11.1" } }, "sha512-1C0wwHiyMlEdsbrJqff5ORE2PwaXBOam5rMqkZVOReAezd5nt6Tl/WGg28UAo75Ziuwchs0KaF8lvnn2oAtvJA=="],
 
@@ -71,5 +74,7 @@
     "whatwg-mimetype": ["whatwg-mimetype@3.0.0", "", {}, "sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q=="],
 
     "ws": ["ws@8.21.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g=="],
+
+    "@absolutejs/handoff/@absolutejs/manifest": ["@absolutejs/manifest@0.7.2", "", { "peerDependencies": { "@sinclair/typebox": ">=0.34.0 <0.35.0" }, "bin": { "absolute-manifest": "dist/cli.js" } }, "sha512-NSVzC4yHbH+n+WCNdWYrpbc+3k5rOfO4X85Ku9VCP8teRaa2VEibp29Cyvg9rQARUGaQjGGTz+l+APqM0+odxg=="],
   }
 }
