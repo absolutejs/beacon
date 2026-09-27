@@ -11,6 +11,7 @@ import {
   isKnownBeaconNoise,
   type Beacon,
   type BeaconEnvelope,
+  type BeaconNetworkFailure,
   type BeaconOptions,
   type WebVital,
   type WebVitalsModule,
@@ -1911,6 +1912,57 @@ describe("auto-instrumentation", () => {
     }
   });
 
+  test("XHR only reads browser-exposed headers and retains available trace IDs", async () => {
+    const originalOpen = XMLHttpRequest.prototype.open;
+    const originalSend = XMLHttpRequest.prototype.send;
+    const originalHeaders = XMLHttpRequest.prototype.getAllResponseHeaders;
+    const originalHeader = XMLHttpRequest.prototype.getResponseHeader;
+    const traceId = "0123456789abcdef0123456789abcdef";
+    let exposed = false;
+    let individualHeaderReads = 0;
+    XMLHttpRequest.prototype.open = function () {};
+    XMLHttpRequest.prototype.send = function () {
+      Object.defineProperty(this, "status", { configurable: true, value: 503 });
+      this.dispatchEvent(new Event("loadend"));
+    };
+    XMLHttpRequest.prototype.getAllResponseHeaders = () =>
+      exposed
+        ? `content-type: text/plain\r\nX-Absolute-Trace-Id: ${traceId}\r\n`
+        : "content-type: text/plain\r\n";
+    XMLHttpRequest.prototype.getResponseHeader = () => {
+      individualHeaderReads += 1;
+      return null;
+    };
+    const { beacon, sent } = make({
+      instrument: { ...ALL_OFF, xhr: true },
+      signals: { serverErrors: true },
+    });
+    try {
+      const hidden = new XMLHttpRequest();
+      hidden.open("GET", "https://third-party.example/hidden");
+      hidden.send();
+      exposed = true;
+      const readable = new XMLHttpRequest();
+      readable.open("GET", "https://api.example/exposed");
+      readable.send();
+      await beacon.flush();
+      expect(individualHeaderReads).toBe(0);
+      const events = sent.flatMap((envelope) => envelope.events);
+      expect(
+        events.find((event) => event.tags?.endpoint === "/hidden")?.traceId,
+      ).toBeUndefined();
+      expect(
+        events.find((event) => event.tags?.endpoint === "/exposed")?.traceId,
+      ).toBe(traceId);
+    } finally {
+      await beacon.close();
+      XMLHttpRequest.prototype.open = originalOpen;
+      XMLHttpRequest.prototype.send = originalSend;
+      XMLHttpRequest.prototype.getAllResponseHeaders = originalHeaders;
+      XMLHttpRequest.prototype.getResponseHeader = originalHeader;
+    }
+  });
+
   test("correlates fetch 5xx signals with the server trace", async () => {
     const originalFetch = globalThis.fetch;
     const traceId = "0123456789abcdef0123456789abcdef";
@@ -2097,6 +2149,47 @@ describe("auto-instrumentation", () => {
       }),
     ]);
     globalThis.fetch = originalFetch;
+  });
+
+  test("retains origins for same-path failures without URL credentials or query strings", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+    const sent: BeaconEnvelope[] = [];
+    const beacon = track(
+      createBeacon({
+        instrument: { ...ALL_OFF, fetch: true },
+        project: "web",
+        signals: { failedRequests: true },
+        transport: ({ body }) => {
+          sent.push(JSON.parse(body) as BeaconEnvelope);
+        },
+      }),
+    );
+    try {
+      await fetch("https://user:secret@alb.reddit.com/rp?token=private", {
+        method: "POST",
+      }).catch(() => undefined);
+      await fetch("https://app.example/rp", { method: "POST" }).catch(
+        () => undefined,
+      );
+      await beacon.flush();
+      const failures = sent[0]?.events[0]?.extra
+        ?.networkFailures as BeaconNetworkFailure[];
+      expect(failures.map(({ origin }) => origin)).toEqual([
+        "https://alb.reddit.com",
+        "https://app.example",
+      ]);
+      expect(sent[0]?.events[0]?.tags?.requestOrigins).toContain(
+        "https://alb.reddit.com",
+      );
+      expect(JSON.stringify(failures)).not.toContain("secret");
+      expect(JSON.stringify(failures)).not.toContain("token=private");
+    } finally {
+      await beacon.close();
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("keeps extension-injected fetch failures as breadcrumbs only", async () => {
@@ -3186,6 +3279,53 @@ describe("ambient watchdog signals", () => {
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
   });
 
+  test("ignores wheels cancelled after the passive detector and still reports uncancelled input", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    Object.defineProperty(scrolling, "scrollHeight", {
+      configurable: true,
+      value: 3000,
+    });
+    Object.defineProperty(scrolling, "clientHeight", {
+      configurable: true,
+      value: VIEWPORT_H,
+    });
+    Object.defineProperty(scrolling, "scrollTop", {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    const cancel = (event: Event) => event.preventDefault();
+    const burst = () => {
+      for (let index = 0; index < 8; index += 1) {
+        const wheel = new Event("wheel", { bubbles: true, cancelable: true });
+        Object.defineProperty(wheel, "deltaY", { value: 100 });
+        Object.defineProperty(wheel, "ctrlKey", { value: false });
+        document.body.dispatchEvent(wheel);
+      }
+    };
+    window.addEventListener("wheel", cancel, { passive: false });
+    try {
+      burst();
+      await new Promise((resolve) => setTimeout(resolve, 550));
+      await beacon.flush();
+      expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
+    } finally {
+      window.removeEventListener("wheel", cancel);
+    }
+    burst();
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
+    expect(signalsSent(sent, "scroll_jail")[0]?.extra?.scroll).toMatchObject({
+      direction: "down",
+      wheelCount: 8,
+      scrollTop: 0,
+      scrollHeight: 3000,
+      clientHeight: VIEWPORT_H,
+    });
+  });
+
   test("reports an immobile modal body when wheel input targets its header", async () => {
     const modal = document.createElement("section");
     modal.setAttribute("aria-modal", "true");
@@ -4195,6 +4335,101 @@ describe("ambient watchdog signals", () => {
         interactionId: "5481",
         target: "unknown",
       });
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("ignores presentation waits only when every observed frame is explicitly idle", async () => {
+    const original = globalThis.PerformanceObserver;
+    let frames: PerformanceEntry[] = [];
+    let processingEnd = 205;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        const entries =
+          options.type === "long-animation-frame"
+            ? frames
+            : options.type === "event"
+              ? [
+                  {
+                    duration: 15576,
+                    entryType: "event",
+                    interactionId: 901,
+                    name: "pointerdown",
+                    processingStart: 204,
+                    processingEnd,
+                    startTime: 100,
+                    target: document.createElement("button"),
+                  },
+                ]
+              : [];
+        this.callback(
+          { getEntries: () => entries } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    const idle = {
+      blockingDuration: 0,
+      duration: 997,
+      entryType: "long-animation-frame",
+      scripts: [],
+      startTime: 200,
+    };
+    const cases = [
+      { frames: [idle], processingEnd: 205, expected: 0 },
+      {
+        frames: [{ ...idle, blockingDuration: 1 }],
+        processingEnd: 205,
+        expected: 1,
+      },
+      {
+        frames: [
+          {
+            ...idle,
+            scripts: [
+              { duration: 6, sourceURL: "https://example.test/app.js" },
+            ],
+          },
+        ],
+        processingEnd: 205,
+        expected: 1,
+      },
+      {
+        frames: [{ ...idle, scripts: undefined }],
+        processingEnd: 205,
+        expected: 1,
+      },
+      {
+        frames: [idle, { ...idle, blockingDuration: 200, startTime: 2000 }],
+        processingEnd: 205,
+        expected: 1,
+      },
+      { frames: [idle], processingEnd: 1400, expected: 1 },
+    ];
+    try {
+      for (const scenario of cases) {
+        frames = scenario.frames as unknown as PerformanceEntry[];
+        processingEnd = scenario.processingEnd;
+        const { beacon, sent } = makeWatchdogBeacon({
+          signals: { slowInteractionMs: 1000 },
+        });
+        await beacon.flush();
+        expect(signalsSent(sent, "slow_interaction")).toHaveLength(
+          scenario.expected,
+        );
+        await beacon.close();
+      }
     } finally {
       globalThis.PerformanceObserver = original;
     }
@@ -6415,6 +6650,42 @@ describe("ambient watchdog signals", () => {
     secondWrap.remove();
   });
 
+  test("collision grouping ignores pixel variation and retains geometry for diagnosis", async () => {
+    const capture = async (top: number, className = "secondary-action") => {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const firstWrap = document.createElement("div");
+      const first = document.createElement("button");
+      first.className = "primary-action";
+      setRect(first, rectOf(100, 500, 100, 150));
+      firstWrap.append(first);
+      const secondWrap = document.createElement("div");
+      secondWrap.style.position = "sticky";
+      const second = document.createElement("button");
+      second.className = className;
+      setRect(second, rectOf(100, 300, top, 184));
+      secondWrap.append(second);
+      document.body.append(firstWrap, secondWrap);
+      try {
+        await settle(beacon);
+        return signalsSent(sent, "control_collision")[0];
+      } finally {
+        firstWrap.remove();
+        secondWrap.remove();
+        await beacon.close();
+      }
+    };
+    const first = await capture(144);
+    const shifted = await capture(140);
+    const differentControl = await capture(140, "different-action");
+    expect(first?.tags?.overlapPx).toBe("6");
+    expect(shifted?.tags?.overlapPx).toBe("10");
+    expect(first?.groupingKey).toBe(shifted?.groupingKey);
+    expect(first?.groupingKey).not.toBe(differentControl?.groupingKey);
+    expect(first?.extra?.layout).toMatchObject({
+      other: { ancestorPosition: "sticky", rect: { top: 144 } },
+    });
+  });
+
   test("allows a positioned field action to overlap its padded input", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const field = document.createElement("div");
@@ -6547,6 +6818,34 @@ describe("ambient watchdog signals", () => {
     extensionFrame.remove();
     await beacon.close();
     document.elementFromPoint = originalFromPoint;
+  });
+
+  test("ignores a 1Password notification but still reports app custom-element covers", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const button = document.createElement("button");
+    setRect(button, rectOf(100, 240, 100, 144));
+    const cover = document.createElement("com-1password-notification");
+    setRect(cover, rectOf(80, 260, 80, 180));
+    document.body.append(button, cover);
+    const originalFromPoint = document.elementFromPoint;
+    document.elementFromPoint = () => cover;
+    try {
+      await settle(beacon);
+      expect(signalsSent(sent, "occluded_control")).toHaveLength(0);
+      const appCover = document.createElement("app-notification");
+      setRect(appCover, rectOf(80, 260, 80, 180));
+      cover.replaceWith(appCover);
+      document.elementFromPoint = () => appCover;
+      window.dispatchEvent(new Event("resize"));
+      await settle(beacon);
+      expect(signalsSent(sent, "occluded_control")).toHaveLength(1);
+      appCover.remove();
+    } finally {
+      button.remove();
+      cover.remove();
+      await beacon.close();
+      document.elementFromPoint = originalFromPoint;
+    }
   });
 
   test("does not report a control clipped below a scrolling ancestor", async () => {

@@ -1,5 +1,49 @@
 {
 	"contract": 1,
 	"name": "@absolutejs/beacon",
-	"releases": []
+	"releases": [
+		{
+			"changes": [
+				{
+					"kind": "fixed",
+					"summary": "Do not promote presentation-only Event Timing waits when every overlapping animation frame explicitly reports zero blocking and no scripts. Preserve incidents with positive blocking, script activity, missing attribution, long handlers or meaningful input delay; Web Vitals collection is unchanged.",
+					"symbols": [
+						"createBeacon",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-09-27",
+			"version": "0.7.0-beta.11"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
+					"summary": "Ignore wheel events cancelled by later handlers when detecting scroll jail, and capture bounded scroll geometry, overflow policy, direction and modal ownership for genuine immobility without changing issue grouping.",
+					"symbols": [
+						"createBeacon",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-09-27",
+			"version": "0.7.0-beta.10"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
+					"summary": "Exclude known 1Password notification covers and retain request origins in network-failure diagnostics without credentials or query strings. Same-origin grouping remains stable across environments. Keep layout pixel measurements out of fingerprints and include geometry and sticky/fixed ancestor context in collision and occlusion reports. Read only browser-exposed XHR response headers to avoid unsafe-header console errors while preserving available trace correlation.",
+					"symbols": [
+						"createBeacon",
+						"BeaconNetworkFailure",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-09-27",
+			"version": "0.7.0-beta.9"
+		}
+	]
 }

@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.8";
+export const BEACON_SDK_VERSION = "0.7.0-beta.11";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -402,6 +402,9 @@ export type BeaconReleaseProbe = {
 };
 
 export type BeaconNetworkFailure = {
+  /** Request origin only; credentials, path and query are never included. */
+  origin?: string;
+  sameOrigin?: boolean;
   at: number;
   durationMs: number;
   endpoint: string;
@@ -1162,6 +1165,17 @@ const UUID_PATH_SEGMENT =
   /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
 const LONG_IDENTIFIER_SEGMENT = /\b(?:[0-9a-f]{16,}|\d{8,})\b/giu;
 const VOLATILE_SIGNAL_TAGS = new Set([
+  "area",
+  "gapPx",
+  "overlapPx",
+  "surfaceColor",
+  "surfaceLuminance",
+  "targetBottomPx",
+  "targetHeightPx",
+  "targetLeftPx",
+  "targetRightPx",
+  "targetTopPx",
+  "targetWidthPx",
   "actionId",
   "actionTrusted",
   "automation",
@@ -2077,10 +2091,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     // Browser automation is useful for exercising production, but watchdog
     // findings from that synthetic session are not production-user incidents.
     // Explicitly captured exceptions and messages still flow through Beacon.
-    if (
-      signals?.suppressAutomatedBrowsers === true &&
-      isAutomatedBrowser()
-    )
+    if (signals?.suppressAutomatedBrowsers === true && isAutomatedBrowser())
       return;
     // A reload loop is evidence about the page lifecycle itself, including a
     // stale page repeatedly reloading before it can reach the current bundle.
@@ -2514,6 +2525,17 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           method: methods.length === 1 ? methods[0]! : "multiple",
           online: onlineStates.length === 1 ? onlineStates[0]! : "mixed",
           reportDelayMs: String(reportDelayMs),
+          requestOrigins: [
+            ...new Set(
+              failures.map((failure) =>
+                failure.sameOrigin === true
+                  ? "same-origin"
+                  : (failure.origin ?? "unknown"),
+              ),
+            ),
+          ]
+            .sort()
+            .join(","),
           signal: BEACON_SIGNAL.FETCH_FAILED,
           transport: transports.length === 1 ? transports[0]! : "multiple",
           visibilityState:
@@ -2526,6 +2548,22 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     }
   };
   flushPendingNetworkFailures = flushNetworkFailures;
+
+  const requestOrigin = (
+    url: string,
+  ): { origin?: string; sameOrigin?: boolean } => {
+    try {
+      const parsed = new URL(url, location.href);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+        return {};
+      return {
+        origin: parsed.origin,
+        sameOrigin: parsed.origin === location.origin,
+      };
+    } catch {
+      return {};
+    }
+  };
 
   const reportFailureSignal = (
     url: string,
@@ -2549,6 +2587,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const properties = errorProperties(error);
     const state = networkState();
     const failure: BeaconNetworkFailure = {
+      ...requestOrigin(url),
       at: Date.now(),
       durationMs,
       endpoint: shortUrl(url),
@@ -3727,6 +3766,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       signal: BeaconSignal,
       detail: string,
       extraTags: Record<string, string>,
+      extra?: Record<string, unknown>,
     ): void => {
       const bucket = viewportBucket();
       const key = `${signal}:${describeElement(element)}@${bucket}`;
@@ -3734,13 +3774,18 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (scanIssueReports >= SCAN_ISSUE_MAX_REPORTS) return;
       seenScanIssues.add(key);
       scanIssueReports += 1;
-      emitSignal(`${detail} — ${shortUrl(location.href)} [${bucket}]`, {
-        ...extraTags,
-        signal,
-        target: describeElement(element),
-        viewportBucket: bucket,
-        viewportWidth: String(document.documentElement.clientWidth),
-      });
+      emitSignal(
+        `${detail} — ${shortUrl(location.href)} [${bucket}]`,
+        {
+          ...extraTags,
+          signal,
+          target: describeElement(element),
+          viewportBucket: bucket,
+          viewportWidth: String(document.documentElement.clientWidth),
+        },
+        undefined,
+        extra,
+      );
     };
 
     const reportOverflow = (
@@ -3969,6 +4014,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
 
     const isExtensionOwnedCover = (element: Element): boolean => {
+      // 1Password injects a custom-element host rather than an extension iframe.
+      // Match the known host only; arbitrary app custom elements still count.
+      if (element.closest("com-1password-notification") !== null) return true;
       if (element.tagName !== "IFRAME") return false;
       const source = element.getAttribute("src")?.trim().toLowerCase() ?? "";
       return (
@@ -3998,6 +4046,50 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const secondDialog = second.closest('[role="dialog"], dialog');
 
       return (firstDialog === null) !== (secondDialog === null);
+    };
+
+    const scanLayoutContext = (
+      target: Element,
+      other: Element,
+    ): Record<string, unknown> => {
+      const geometry = (element: Element) => {
+        const rect = element.getBoundingClientRect();
+        let positionedAncestor: Element | null = element;
+        while (
+          positionedAncestor !== null &&
+          !["fixed", "sticky"].includes(
+            window.getComputedStyle(positionedAncestor).position,
+          )
+        ) {
+          positionedAncestor = positionedAncestor.parentElement;
+        }
+        return {
+          rect: {
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            left: rect.left,
+            width: rect.width,
+            height: rect.height,
+          },
+          position: window.getComputedStyle(element).position,
+          ...(positionedAncestor
+            ? {
+                positionedAncestor: describeElement(positionedAncestor),
+                ancestorPosition:
+                  window.getComputedStyle(positionedAncestor).position,
+              }
+            : {}),
+        };
+      };
+      return {
+        layout: {
+          target: geometry(target),
+          other: geometry(other),
+          scrollX: window.scrollX,
+          scrollY: window.scrollY,
+        },
+      };
     };
 
     const scanForControlCollisions = (): void => {
@@ -4080,6 +4172,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                   Math.round(axis === "vertical" ? overlapY : overlapX),
                 ),
               },
+              scanLayoutContext(first.element, second.element),
             );
             continue;
           }
@@ -4134,6 +4227,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                 Math.round(axis === "vertical" ? verticalGap : horizontalGap),
               ),
             },
+            scanLayoutContext(first.element, second.element),
           );
         }
       }
@@ -4196,6 +4290,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           BEACON_SIGNAL.OCCLUDED_CONTROL,
           `Occluded control — ${describeElement(control)} is covered by ${describeElement(top)}`,
           { coveredBy: describeElement(top) },
+          scanLayoutContext(control, top),
         );
       }
     };
@@ -5126,21 +5221,32 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             recordBlockingFrames(blockingObserver.takeRecords());
           }
           const interactionEnd = entry.startTime + entry.duration;
-          const overlappingFrame = blockingFrames
-            .filter(
+          const overlappingFrames = blockingFrames.filter(
+            (frame) =>
+              frame.startTime < interactionEnd &&
+              frame.startTime + frame.duration > entry.startTime,
+          );
+          // Frame duration includes waiting for presentation. Explicitly idle
+          // LoAFs are not evidence of application blocking; unknown metadata,
+          // any script activity, long tasks and any positive blocking remain.
+          const onlyIdleFrames =
+            overlappingFrames.length > 0 &&
+            overlappingFrames.every(
               (frame) =>
-                frame.startTime < interactionEnd &&
-                frame.startTime + frame.duration > entry.startTime,
-            )
-            .sort((left, right) => {
-              const leftBlocking =
-                left.blockingDuration ??
-                Math.max(0, left.duration - LONG_TASK_MS);
-              const rightBlocking =
-                right.blockingDuration ??
-                Math.max(0, right.duration - LONG_TASK_MS);
-              return rightBlocking - leftBlocking;
-            })[0];
+                frame.entryType === "long-animation-frame" &&
+                frame.blockingDuration === 0 &&
+                Array.isArray(frame.scripts) &&
+                frame.scripts.length === 0,
+            );
+          const overlappingFrame = overlappingFrames.sort((left, right) => {
+            const leftBlocking =
+              left.blockingDuration ??
+              Math.max(0, left.duration - LONG_TASK_MS);
+            const rightBlocking =
+              right.blockingDuration ??
+              Math.max(0, right.duration - LONG_TASK_MS);
+            return rightBlocking - leftBlocking;
+          })[0];
           const script = [...(overlappingFrame?.scripts ?? [])].sort(
             (left, right) => (right.duration ?? 0) - (left.duration ?? 0),
           )[0];
@@ -5164,7 +5270,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           // that unfixable browser sample to an issue. Preserve entries when a
           // blocking frame or meaningful application processing remains.
           if (
-            overlappingFrame === undefined &&
+            (overlappingFrame === undefined ||
+              (onlyIdleFrames &&
+                inputDelayMs !== undefined &&
+                inputDelayMs < minimum)) &&
             processingDurationMs !== undefined &&
             processingDurationMs <= 16 &&
             presentationDelayMs !== undefined &&
@@ -5741,7 +5850,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
         return outermost.length === 1 ? (outermost[0] ?? null) : null;
       };
-      let jailBurst: Array<{ at: number; position: number }> = [];
+      let jailBurst: Array<{
+        at: number;
+        position: number;
+        event: WheelEvent;
+      }> = [];
       let jailScroller: Element | null = null;
       let jailSettleTimer: ReturnType<typeof setTimeout> | undefined;
       let scrollActivityGeneration = 0;
@@ -5792,12 +5905,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           jailBurst = [];
         }
         jailBurst = jailBurst.filter(
-          (entry) => now - entry.at < SCROLL_JAIL_WINDOW_MS,
+          (entry) =>
+            now - entry.at < SCROLL_JAIL_WINDOW_MS &&
+            !entry.event.defaultPrevented,
         );
         if (jailBurst.length === 0) {
           jailStartingScrollGeneration = scrollActivityGeneration;
         }
-        jailBurst.push({ at: now, position: scroller.scrollTop });
+        jailBurst.push({ at: now, position: scroller.scrollTop, event });
         if (jailBurst.length < SCROLL_JAIL_EVENT_COUNT) return;
         const first = jailBurst[0];
         const moved =
@@ -5812,7 +5927,13 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         const startingPosition = first.position;
         jailSettleTimer = setTimeout(() => {
           jailSettleTimer = undefined;
+          // A later document/window handler can cancel the default action after
+          // our passive listener runs. Count only events the browser could scroll.
+          const confirmedBurst = jailBurst.filter(
+            (entry) => !entry.event.defaultPrevented,
+          );
           jailBurst = [];
+          if (confirmedBurst.length < SCROLL_JAIL_EVENT_COUNT) return;
           if (scrollActivityGeneration !== jailStartingScrollGeneration) return;
           if (!scroller.isConnected || scroller.scrollTop !== startingPosition)
             return;
@@ -5836,6 +5957,32 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           emitSignal(
             `Scroll jail — ${descriptor} has scrollable content but never moves — ${shortUrl(location.href)}`,
             { signal: BEACON_SIGNAL.SCROLL_JAIL, target: descriptor },
+            undefined,
+            {
+              scroll: {
+                target: target ? describeElement(target) : undefined,
+                scroller: descriptor,
+                direction: scrollingDown ? "down" : "up",
+                wheelCount: confirmedBurst.length,
+                burstDurationMs: now - (confirmedBurst[0]?.at ?? now),
+                scrollTop: scroller.scrollTop,
+                scrollHeight: scroller.scrollHeight,
+                clientHeight: scroller.clientHeight,
+                overflowY: window.getComputedStyle(scroller).overflowY,
+                overscrollBehaviorY:
+                  window.getComputedStyle(scroller).overscrollBehaviorY,
+                bodyOverflowY: window.getComputedStyle(document.body).overflowY,
+                rootOverflowY: window.getComputedStyle(document.documentElement)
+                  .overflowY,
+                modal: modal ? describeElement(modal) : undefined,
+                rect: {
+                  top: scroller.getBoundingClientRect().top,
+                  left: scroller.getBoundingClientRect().left,
+                  width: scroller.getBoundingClientRect().width,
+                  height: scroller.getBoundingClientRect().height,
+                },
+              },
+            },
           );
         }, SCROLL_JAIL_SETTLE_MS);
       };
@@ -7374,12 +7521,23 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               type: "xhr",
             });
             if (!failed) {
+              // The browser filters this list to readable headers. Asking XHR
+              // for an unexposed cross-origin header emits a console error.
+              const headers = new Headers();
+              for (const line of this.getAllResponseHeaders().split(/\r?\n/u)) {
+                const separator = line.indexOf(":");
+                if (separator <= 0) continue;
+                headers.append(
+                  line.slice(0, separator).trim(),
+                  line.slice(separator + 1).trim(),
+                );
+              }
               reportResponseSignal(
                 request.url,
                 request.method,
                 this.status,
                 Date.now() - start,
-                responseTraceId(this.getResponseHeader(BEACON_TRACE_HEADER)),
+                responseTraceId(headers.get(BEACON_TRACE_HEADER)),
               );
               if (
                 ((instrument.classifyResponse !== undefined &&
@@ -7389,17 +7547,6 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                     this.status >= 400)) &&
                 (this.responseType === "" || this.responseType === "text")
               ) {
-                const headers = new Headers();
-                for (const line of this.getAllResponseHeaders().split(
-                  /\r?\n/u,
-                )) {
-                  const separator = line.indexOf(":");
-                  if (separator <= 0) continue;
-                  headers.append(
-                    line.slice(0, separator).trim(),
-                    line.slice(separator + 1).trim(),
-                  );
-                }
                 classifyInstrumentedResponse(
                   new Response(this.responseText, {
                     headers,
