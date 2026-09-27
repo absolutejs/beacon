@@ -6,6 +6,20 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Stop TBT observation after its measurement window and clean up on close; ignore late vital delivery.",
+					"symbols": [
+						"createBeacon",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-09-27",
+			"version": "0.7.0-beta.12"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Do not promote presentation-only Event Timing waits when every overlapping animation frame explicitly reports zero blocking and no scripts. Preserve incidents with positive blocking, script activity, missing attribution, long handlers or meaningful input delay; Web Vitals collection is unchanged.",
 					"symbols": [
 						"createBeacon",

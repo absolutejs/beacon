@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.11";
+export const BEACON_SDK_VERSION = "0.7.0-beta.12";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1402,71 +1402,92 @@ const TBT_POOR_MS = 600;
 const observeLongTasks = (
   report: (metric: WebVitalMetric) => void,
   navigationType: string,
-): void => {
-  if (typeof PerformanceObserver === "undefined") return;
+): (() => void) => {
+  if (typeof PerformanceObserver === "undefined") return () => {};
   const longTasks: Array<{ duration: number; startTime: number }> = [];
-  let reported = false;
+  let observer: PerformanceObserver | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+  const firstPaint = () =>
+    performance.getEntriesByName("first-contentful-paint")[0]?.startTime;
+  const collect = (entries: PerformanceEntryList) => {
+    if (stopped) return;
+    const windowStart = firstPaint() ?? 0;
+    for (const entry of entries) {
+      if (
+        entry.startTime < windowStart ||
+        entry.startTime >= windowStart + TBT_WINDOW_MS
+      )
+        continue;
+      longTasks.push({ duration: entry.duration, startTime: entry.startTime });
+    }
+  };
+  const onVisibilityChange = () => {
+    if (document.visibilityState === "hidden") flush();
+  };
+  const stop = () => {
+    stopped = true;
+    if (timer !== undefined) clearTimeout(timer);
+    observer?.disconnect();
+    window.removeEventListener("visibilitychange", onVisibilityChange);
+    window.removeEventListener("pagehide", flush);
+    longTasks.length = 0;
+  };
+  const flush = () => {
+    if (stopped) return;
+    collect(observer?.takeRecords() ?? []);
+    const paint = firstPaint();
+    const windowStart = paint ?? 0;
+    const tasks = longTasks.filter(
+      ({ startTime }) =>
+        startTime >= windowStart && startTime < windowStart + TBT_WINDOW_MS,
+    );
+    stop();
+    if (tasks.length === 0) return;
+    const value = Math.round(
+      tasks.reduce(
+        (total, { duration }) => total + Math.max(0, duration - LONG_TASK_MS),
+        0,
+      ),
+    );
+    report({
+      attribution: {
+        measurementWindow: paint === undefined ? "navigation" : "FCP",
+        measurementWindowMs: TBT_WINDOW_MS,
+      },
+      id: `tbt-${navigationType}-${TBT_WINDOW_MS}-${value}`,
+      name: "TBT",
+      navigationType,
+      rating:
+        value <= TBT_GOOD_MS
+          ? "good"
+          : value >= TBT_POOR_MS
+            ? "poor"
+            : "needs-improvement",
+      value,
+    });
+  };
+  const finishWindow = () => {
+    if (stopped) return;
+    // FCP may arrive after registration; honor its window before stopping.
+    const remaining = (firstPaint() ?? 0) + TBT_WINDOW_MS - performance.now();
+    if (remaining > 0) timer = setTimeout(finishWindow, remaining);
+    else flush();
+  };
   try {
-    const observer = new PerformanceObserver((list) => {
-      const windowStart =
-        performance.getEntriesByName("first-contentful-paint")[0]?.startTime ??
-        0;
-      const windowEnd = windowStart + TBT_WINDOW_MS;
-      for (const entry of list.getEntries()) {
-        if (entry.startTime < windowStart || entry.startTime >= windowEnd)
-          continue;
-        longTasks.push({
-          duration: entry.duration,
-          startTime: entry.startTime,
-        });
-      }
-    });
+    observer = new PerformanceObserver((list) => collect(list.getEntries()));
     observer.observe({ buffered: true, type: "longtask" });
-    const flush = (): void => {
-      if (reported) return;
-      const firstContentfulPaint = performance.getEntriesByName(
-        "first-contentful-paint",
-      )[0]?.startTime;
-      const windowStart = firstContentfulPaint ?? 0;
-      const windowEnd = windowStart + TBT_WINDOW_MS;
-      const tasksInWindow = longTasks.filter(
-        ({ startTime }) => startTime >= windowStart && startTime < windowEnd,
-      );
-      if (tasksInWindow.length === 0) return;
-      reported = true;
-      const value = Math.round(
-        tasksInWindow.reduce(
-          (total, { duration }) => total + Math.max(0, duration - LONG_TASK_MS),
-          0,
-        ),
-      );
-      report({
-        attribution: {
-          measurementWindow:
-            firstContentfulPaint === undefined ? "navigation" : "FCP",
-          measurementWindowMs: TBT_WINDOW_MS,
-        },
-        id: `tbt-${navigationType}-${TBT_WINDOW_MS}-${value}`,
-        name: "TBT",
-        navigationType,
-        rating:
-          value <= TBT_GOOD_MS
-            ? "good"
-            : value >= TBT_POOR_MS
-              ? "poor"
-              : "needs-improvement",
-        value,
-      });
-    };
-    // pagehide is terminal — flush unconditionally; visibilitychange only when
-    // the page is actually hidden (matches the web-vitals reporting pattern).
-    addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") flush();
-    });
-    addEventListener("pagehide", flush);
+    window.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pagehide", flush);
+    // A task also lets a late-mounted observer deliver buffered entries first.
+    timer = setTimeout(
+      finishWindow,
+      Math.max(0, (firstPaint() ?? 0) + TBT_WINDOW_MS - performance.now()),
+    );
   } catch {
-    // longtask entry type unsupported — skip
+    stop();
   }
+  return stop;
 };
 const isVitalName = (name: string): name is WebVital["name"] =>
   VITAL_NAMES.has(name);
@@ -1830,6 +1851,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     return false;
   };
 
+  const cleanups: Array<() => void> = [];
+  let closed = false;
+
   // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
   const vitalsOptions: BeaconVitalsOptions | null =
     options.vitals === undefined || options.vitals === false
@@ -1840,7 +1864,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   if (vitalsOptions !== null) {
     const vitalsEndpoint = vitalsOptions.endpoint ?? "/ingest/vitals";
     const reportVital = (metric: WebVitalMetric): void => {
-      if (!isVitalName(metric.name)) return;
+      if (closed || !isVitalName(metric.name)) return;
       const replayId = options.getReplayId?.();
       const traceId = options.getTraceId?.();
       const vital: WebVital = {
@@ -1902,7 +1926,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       observeWebVitals(vitalsOptions.webVitals, reportVital);
     } else {
       loadWebVitals()
-        .then((webVitals) => observeWebVitals(webVitals, reportVital))
+        .then((webVitals) => {
+          if (!closed) observeWebVitals(webVitals, reportVital);
+        })
         .catch(() => {
           console.warn(
             "[beacon] web-vitals not installed; vitals disabled. `bun add web-vitals`.",
@@ -1915,12 +1941,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       navigationEntry instanceof PerformanceNavigationTiming
         ? navigationEntry.type
         : "navigate";
-    observeLongTasks(reportVital, navigationType);
+    cleanups.push(observeLongTasks(reportVital, navigationType));
   }
 
   const buffer: BeaconEvent[] = [];
   const breadcrumbs: Breadcrumb[] = [];
-  const cleanups: Array<() => void> = [];
   const pendingClickCleanups = new Set<() => void>();
   cleanups.push(() => {
     for (const cleanup of pendingClickCleanups) cleanup();
@@ -7726,6 +7751,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     captureException,
     captureMessage,
     close: async () => {
+      closed = true;
       for (const cleanup of cleanups.splice(0, cleanups.length)) cleanup();
       await flush(true);
     },
