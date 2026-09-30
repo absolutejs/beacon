@@ -187,6 +187,23 @@ export const isStaleChunkImport = (
   event: Pick<BeaconEvent, "message">,
 ): boolean => STALE_CHUNK_IMPORT.test(event.message);
 
+const OPAQUE_SCRIPT_ERROR = /^script error\.?$/iu;
+
+/**
+ * A browser hides an error thrown by a script from another origin (an
+ * extension, an ad or analytics tag, a CDN script without CORS) behind a bare
+ * "Script error." with no message, file or stack. Nothing in it can be acted
+ * on or even attributed to the application.
+ */
+export const isOpaqueScriptError = (
+  event: Pick<BeaconEvent, "message" | "stack">,
+): boolean =>
+  OPAQUE_SCRIPT_ERROR.test(event.message.trim()) &&
+  !(event.stack ?? "")
+    .split("\n")
+    .slice(1)
+    .some((line) => line.trim() !== "");
+
 const THEME_EXTENSION_INLINE_STYLE = /--(?:darkreader|noir)-inline-/u;
 
 const breadcrumbMessage = (breadcrumb: unknown): string | undefined => {
@@ -264,6 +281,8 @@ export type NoisePolicyOptions = {
   ignoreStaleChunkImports?: boolean;
   /** Suppress hydration mismatches written by theme extensions. Default true. */
   ignoreThemeExtensionHydration?: boolean;
+  /** Suppress cross-origin "Script error." with no stack. Default true. */
+  ignoreOpaqueScriptErrors?: boolean;
   /** Application-specific rules, run after the built-in ones. */
   rules?: readonly ((event: BeaconEvent) => boolean)[];
 };
@@ -279,6 +298,7 @@ export const createNoisePolicy = (options: NoisePolicyOptions = {}) => {
     exemptions = [],
     externalDeprecations = [ATTRIBUTION_REPORTING_DEPRECATION],
     ignoreHiddenReadFailures = true,
+    ignoreOpaqueScriptErrors = true,
     ignoreServerCapturedFailures = true,
     ignoreStaleChunkImports = true,
     ignoreThemeExtensionHydration = true,
@@ -291,6 +311,7 @@ export const createNoisePolicy = (options: NoisePolicyOptions = {}) => {
     (ownsReleaseUpdates && isStaleReleaseSignal(event)) ||
     (ignoreStaleChunkImports && isStaleChunkImport(event)) ||
     (ignoreThemeExtensionHydration && isThemeExtensionHydrationNoise(event)) ||
+    (ignoreOpaqueScriptErrors && isOpaqueScriptError(event)) ||
     (ignoreHiddenReadFailures && isHiddenReadFailure(event)) ||
     (ignoreServerCapturedFailures &&
       isServerCapturedHttpFailure(event, probeEndpoints)) ||

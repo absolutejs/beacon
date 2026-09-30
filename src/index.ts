@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.13";
+export const BEACON_SDK_VERSION = "0.7.0-beta.14";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -4063,6 +4063,14 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       );
     };
 
+    // Shapes in one drawing (donut segments, chart bars, map regions) are hit
+    // by their painted geometry, not their boxes: stacked ring segments share
+    // one bounding box without a single pixel of either being unreachable.
+    const sharesDrawing = (first: Element, second: Element): boolean => {
+      const drawing = first.closest("svg");
+      return drawing !== null && drawing === second.closest("svg");
+    };
+
     const crossesDialogBoundary = (
       first: Element,
       second: Element,
@@ -4160,7 +4168,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           if (
             first.element.contains(second.element) ||
             second.element.contains(first.element) ||
-            crossesDialogBoundary(first.element, second.element)
+            crossesDialogBoundary(first.element, second.element) ||
+            sharesDrawing(first.element, second.element)
           ) {
             continue;
           }

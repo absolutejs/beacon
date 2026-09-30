@@ -16,6 +16,7 @@ import {
   eventEndpoints,
   isHiddenReadFailure,
   isServerCapturedHttpFailure,
+  isOpaqueScriptError,
   isStaleChunkImport,
   isThemeExtensionHydrationNoise,
   matchesEndpointExemption,
@@ -225,6 +226,29 @@ describe("built-in rules", () => {
         message,
       }),
     ).toBe(false);
+  });
+});
+
+describe("isOpaqueScriptError", () => {
+  test("drops a bare cross-origin script error", () => {
+    expect(isOpaqueScriptError({ message: "Script error." })).toBe(true);
+    expect(
+      isOpaqueScriptError({
+        message: "Script error.",
+        stack: "Error: Script error.",
+      }),
+    ).toBe(true);
+  });
+  test("keeps an error that has its own frames", () => {
+    expect(
+      isOpaqueScriptError({
+        message: "Script error.",
+        stack: "Error: Script error.\n    at render (app.js:1:2)",
+      }),
+    ).toBe(false);
+    expect(isOpaqueScriptError({ message: "Script error in chart" })).toBe(
+      false,
+    );
   });
 });
 

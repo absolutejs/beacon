@@ -6798,6 +6798,25 @@ describe("ambient watchdog signals", () => {
     dialog.remove();
   });
 
+  test("allows stacked shapes inside one drawing", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const svgNs = "http://www.w3.org/2000/svg";
+    const donut = document.createElementNS(svgNs, "svg");
+    const segments = [0, 1].map(() => {
+      const segment = document.createElementNS(svgNs, "circle");
+      segment.setAttribute("role", "button");
+      setRect(segment as unknown as HTMLElement, rectOf(100, 200, 100, 200));
+      donut.append(segment);
+      return segment;
+    });
+    document.body.append(donut);
+
+    await settle(beacon);
+    expect(segments).toHaveLength(2);
+    expect(signalsSent(sent, "control_collision")).toHaveLength(0);
+    donut.remove();
+  });
+
   test("allows touching controls inside an intentional control group", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const toolbar = document.createElement("div");
