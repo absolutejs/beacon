@@ -10,6 +10,7 @@ export const BEACON_SIGNAL = {
   CONTROL_COLLISION: "control_collision",
   CSP_VIOLATION: "csp_violation",
   CLIPBOARD_FAILURE: "clipboard_failure",
+  COLLAPSED_MODAL: "collapsed_modal",
   DEAD_CLICK: "dead_click",
   DISRUPTIVE_LAYOUT_SHIFT: "disruptive_layout_shift",
   DOCUMENT_DISCARDED: "document_discarded",

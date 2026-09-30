@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.14";
+export const BEACON_SDK_VERSION = "0.7.0-beta.15";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -283,6 +283,10 @@ export type BeaconSignals = {
   mainThreadStallCount?: number;
   /** Window for repeated main-thread stalls. Default 10000ms. */
   mainThreadStallWindowMs?: number;
+  /** A modal (open `<dialog>` or `aria-modal`) that opens with content but
+   *  renders too small to see, such as a flex layout one engine collapses to
+   *  zero height. To the user the click simply did nothing. Default true. */
+  collapsedModals?: boolean;
   /** Focus outside an open modal, including a modal that never receives
    *  initial focus. Default true. */
   modalFocusEscape?: boolean;
@@ -1683,6 +1687,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const STALLED_STREAM_DEFAULT_MS = 60000;
   const SERVICE_WORKER_RECOVERY_DEFAULT_MS = 8000;
   const MODAL_FOCUS_SETTLE_MS = 100;
+  // Smaller than this in either direction, an open modal can't be read or
+  // used; judged after the modal has had time to lay out and animate in.
+  const COLLAPSED_MODAL_MIN_PX = 24;
+  const COLLAPSED_MODAL_SETTLE_MS = 400;
   const MAIN_THREAD_STALL_DEFAULT_MS = 200;
   const MAIN_THREAD_STALL_DEFAULT_COUNT = 3;
   const MAIN_THREAD_STALL_DEFAULT_WINDOW_MS = 10000;
@@ -6091,6 +6099,114 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
 
     // Dialog focus: report both focus dropped after unmount and focus escaping
     // (or never entering) an explicitly modal surface.
+    if (
+      signals.collapsedModals !== false &&
+      typeof MutationObserver !== "undefined"
+    ) {
+      const COLLAPSED_MODAL_SELECTOR = '[aria-modal="true"], dialog[open]';
+      const reportedCollapsedModals = new WeakSet<Element>();
+      const pendingCollapsedModals = new WeakSet<Element>();
+      const collapsedModalTimers = new Set<ReturnType<typeof setTimeout>>();
+      const isHiddenOnPurpose = (modal: Element): boolean => {
+        let current: Element | null = modal;
+        while (current !== null) {
+          if (
+            current.hasAttribute("hidden") ||
+            current.getAttribute("aria-hidden")?.toLowerCase() === "true"
+          ) {
+            return true;
+          }
+          const style = getComputedStyle(current);
+          if (
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            style.visibility === "collapse" ||
+            style.contentVisibility === "hidden"
+          ) {
+            return true;
+          }
+          current = current.parentElement;
+        }
+        return false;
+      };
+      const checkCollapsedModal = (modal: Element): void => {
+        if (
+          reportedCollapsedModals.has(modal) ||
+          pendingCollapsedModals.has(modal)
+        ) {
+          return;
+        }
+        pendingCollapsedModals.add(modal);
+        // Opening animations and a first render can start from nothing; judge
+        // the modal once it has had time to lay out.
+        const timer = setTimeout(() => {
+          collapsedModalTimers.delete(timer);
+          pendingCollapsedModals.delete(modal);
+          if (
+            !modal.isConnected ||
+            !modal.matches(COLLAPSED_MODAL_SELECTOR) ||
+            modal.childElementCount === 0 ||
+            document.visibilityState === "hidden" ||
+            isHiddenOnPurpose(modal)
+          ) {
+            return;
+          }
+          const rect = modal.getBoundingClientRect();
+          if (
+            rect.width >= COLLAPSED_MODAL_MIN_PX &&
+            rect.height >= COLLAPSED_MODAL_MIN_PX
+          ) {
+            return;
+          }
+          reportedCollapsedModals.add(modal);
+          const modalDescriptor = describeElement(modal);
+          emitSignal(
+            `Collapsed modal — ${modalDescriptor} opened at ${Math.round(rect.width)}×${Math.round(rect.height)}px — ${shortUrl(location.href)}`,
+            {
+              contentHeightPx: String(Math.round(modal.scrollHeight)),
+              contentWidthPx: String(Math.round(modal.scrollWidth)),
+              heightPx: String(Math.round(rect.height)),
+              modal: modalDescriptor,
+              signal: BEACON_SIGNAL.COLLAPSED_MODAL,
+              widthPx: String(Math.round(rect.width)),
+            },
+          );
+        }, COLLAPSED_MODAL_SETTLE_MS);
+        collapsedModalTimers.add(timer);
+      };
+      const scanForModals = (root: Element): void => {
+        if (root.matches(COLLAPSED_MODAL_SELECTOR)) checkCollapsedModal(root);
+        for (const modal of Array.from(
+          root.querySelectorAll(COLLAPSED_MODAL_SELECTOR),
+        )) {
+          checkCollapsedModal(modal);
+        }
+      };
+      scanForModals(document.documentElement);
+      const collapsedModalObserver = new MutationObserver((records) => {
+        for (const record of records) {
+          if (record.type === "attributes") {
+            if (record.target instanceof Element) scanForModals(record.target);
+            continue;
+          }
+          for (const node of Array.from(record.addedNodes)) {
+            if (node instanceof Element) scanForModals(node);
+          }
+        }
+      });
+      collapsedModalObserver.observe(document.documentElement, {
+        attributeFilter: ["open", "aria-modal"],
+        attributes: true,
+        childList: true,
+        subtree: true,
+      });
+      cleanups.push(() => {
+        collapsedModalObserver.disconnect();
+        for (const timer of collapsedModalTimers) clearTimeout(timer);
+        collapsedModalTimers.clear();
+      });
+    }
+
     if (signals.focusLoss !== false || signals.modalFocusEscape !== false) {
       const DIALOG_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog';
       const MODAL_SELECTOR = '[aria-modal="true"], dialog[open]';

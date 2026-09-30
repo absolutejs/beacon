@@ -6798,6 +6798,75 @@ describe("ambient watchdog signals", () => {
     dialog.remove();
   });
 
+  describe("collapsed modals", () => {
+    const openDialog = (width: number, height: number, content = true) => {
+      const dialog = document.createElement("dialog");
+      dialog.className = "task-dialog";
+      if (content) dialog.append(document.createElement("div"));
+      setRect(dialog, rectOf(160, 160 + width, 440, 440 + height));
+      document.body.append(dialog);
+      dialog.setAttribute("open", "");
+      return dialog;
+    };
+    const laidOut = () => new Promise((resolve) => setTimeout(resolve, 450));
+
+    test("reports a dialog that opens with content but no height", async () => {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const dialog = openDialog(1080, 2);
+      await laidOut();
+      await beacon.flush();
+      const events = signalsSent(sent, "collapsed_modal");
+      expect(events).toHaveLength(1);
+      expect(events[0]?.tags).toMatchObject({
+        heightPx: "2",
+        modal: "dialog.task-dialog",
+        widthPx: "1080",
+      });
+      // The same dialog doesn't report twice when it reopens.
+      dialog.removeAttribute("open");
+      dialog.setAttribute("open", "");
+      await laidOut();
+      await beacon.flush();
+      expect(signalsSent(sent, "collapsed_modal")).toHaveLength(1);
+      dialog.remove();
+    });
+
+    test("leaves a normally sized dialog alone", async () => {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const dialog = openDialog(600, 400);
+      await laidOut();
+      await beacon.flush();
+      expect(signalsSent(sent, "collapsed_modal")).toHaveLength(0);
+      dialog.remove();
+    });
+
+    test("ignores empty, hidden and quickly closed dialogs", async () => {
+      const { beacon, sent } = makeWatchdogBeacon();
+      const empty = openDialog(0, 0, false);
+      const hidden = openDialog(0, 0);
+      hidden.style.display = "none";
+      const closed = openDialog(0, 0);
+      closed.removeAttribute("open");
+      await laidOut();
+      await beacon.flush();
+      expect(signalsSent(sent, "collapsed_modal")).toHaveLength(0);
+      empty.remove();
+      hidden.remove();
+      closed.remove();
+    });
+
+    test("can be turned off", async () => {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { collapsedModals: false },
+      });
+      const dialog = openDialog(1080, 2);
+      await laidOut();
+      await beacon.flush();
+      expect(signalsSent(sent, "collapsed_modal")).toHaveLength(0);
+      dialog.remove();
+    });
+  });
+
   test("allows stacked shapes inside one drawing", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const svgNs = "http://www.w3.org/2000/svg";
