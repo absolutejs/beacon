@@ -5872,6 +5872,63 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("does not report a service worker replaced by a newer release", async () => {
+    const serviceWorkerDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      "serviceWorker",
+    );
+    class FakeServiceWorker extends EventTarget {
+      readonly scriptURL = "https://app.test/sw.js";
+      state: ServiceWorkerState = "installing";
+    }
+    const waiting = new FakeServiceWorker();
+    const interrupted = new FakeServiceWorker();
+    const registration = new EventTarget() as EventTarget & {
+      installing: ServiceWorker | null;
+      waiting: ServiceWorker | null;
+    };
+    registration.installing = waiting as unknown as ServiceWorker;
+    registration.waiting = null;
+    const container = new EventTarget() as EventTarget & {
+      register: ServiceWorkerContainer["register"];
+    };
+    container.register = async () =>
+      registration as unknown as ServiceWorkerRegistration;
+    Object.defineProperty(navigator, "serviceWorker", {
+      configurable: true,
+      value: container,
+    });
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await navigator.serviceWorker.register("/sw.js");
+      // Installed, then left waiting until the next deploy replaced it.
+      waiting.state = "installed";
+      waiting.dispatchEvent(new Event("statechange"));
+      registration.installing = interrupted as unknown as ServiceWorker;
+      registration.dispatchEvent(new Event("updatefound"));
+      waiting.state = "redundant";
+      waiting.dispatchEvent(new Event("statechange"));
+      // A worker cut off mid-install by an even newer one.
+      const newest = new FakeServiceWorker();
+      registration.installing = newest as unknown as ServiceWorker;
+      interrupted.state = "redundant";
+      interrupted.dispatchEvent(new Event("statechange"));
+      await beacon.flush();
+      expect(signalsSent(sent, "service_worker_failure")).toHaveLength(0);
+      await beacon.close();
+    } finally {
+      if (serviceWorkerDescriptor === undefined) {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+      } else {
+        Object.defineProperty(
+          navigator,
+          "serviceWorker",
+          serviceWorkerDescriptor,
+        );
+      }
+    }
+  });
+
   test("reports one endpoint hammered inside the window as a storm", async () => {
     const originalFetch = window.fetch;
     window.fetch = (async () =>

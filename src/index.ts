@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.12";
+export const BEACON_SDK_VERSION = "0.7.0-beta.13";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -6896,11 +6896,27 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               },
         );
       };
-      const watchInstallingWorker = (worker: ServiceWorker): void => {
-        let activated = worker.state === "activated";
+      const watchInstallingWorker = (
+        worker: ServiceWorker,
+        registration?: ServiceWorkerRegistration,
+      ): void => {
+        // A worker that finished installing and then went redundant was
+        // replaced by a newer release while it waited (`skipWaiting: false`
+        // apps across deploys); so was one whose registration already holds
+        // a different worker in progress. Only a failed install is a failure.
+        let settled =
+          worker.state === "installed" || worker.state === "activated";
         const onStateChange = (): void => {
-          if (worker.state === "activated") activated = true;
-          if (worker.state !== "redundant" || activated) return;
+          if (worker.state === "installed" || worker.state === "activated")
+            settled = true;
+          if (worker.state !== "redundant" || settled) return;
+          const successor = registration?.installing ?? registration?.waiting;
+          if (
+            successor !== null &&
+            successor !== undefined &&
+            successor !== worker
+          )
+            return;
           reportServiceWorkerFailure(
             shortUrl(worker.scriptURL),
             "installation",
@@ -6915,11 +6931,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         registration: ServiceWorkerRegistration,
       ): void => {
         if (registration.installing !== null) {
-          watchInstallingWorker(registration.installing);
+          watchInstallingWorker(registration.installing, registration);
         }
         const onUpdateFound = (): void => {
           if (registration.installing !== null) {
-            watchInstallingWorker(registration.installing);
+            watchInstallingWorker(registration.installing, registration);
           }
         };
         registration.addEventListener("updatefound", onUpdateFound);

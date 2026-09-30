@@ -6,6 +6,20 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Do not report a service worker as a failed installation when a newer release replaced it: one that finished installing and then waited, or one cut off mid-install by a newer worker. A worker that fails its own install still reports.",
+					"symbols": [
+						"createBeacon",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-09-30",
+			"version": "0.7.0-beta.13"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Stop TBT observation after its measurement window and clean up on close; ignore late vital delivery.",
 					"symbols": [
 						"createBeacon",
