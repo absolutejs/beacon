@@ -6,6 +6,19 @@
 			"changes": [
 				{
 					"kind": "added",
+					"summary": "A durable browser outbox (@absolutejs/beacon/outbox): bounded IndexedDB or memory storage, acknowledged delivery, retry backoff and pruning",
+					"symbols": [
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-10-24",
+			"version": "0.7.0-beta.16"
+		},
+		{
+			"changes": [
+				{
+					"kind": "added",
 					"summary": "Report a modal (an open `<dialog>` or `aria-modal` element) that opens with content but renders under 24px in either direction, such as a flex layout one browser engine collapses to zero height: to the person the click did nothing. New `collapsed_modal` signal with the rendered and content sizes; `signals.collapsedModals: false` turns it off.",
 					"symbols": [
 						"createBeacon",
