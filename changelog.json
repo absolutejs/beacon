@@ -5,6 +5,19 @@
 		{
 			"changes": [
 				{
+					"kind": "fixed",
+					"summary": "Keep loading and mobile-focus issue fingerprints stable when wait durations, deadlines and keyboard viewport measurements vary.",
+					"symbols": [
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-10-24",
+			"version": "0.7.0-beta.17"
+		},
+		{
+			"changes": [
+				{
 					"kind": "added",
 					"summary": "A durable browser outbox (@absolutejs/beacon/outbox): bounded IndexedDB or memory storage, acknowledged delivery, retry backoff and pruning",
 					"symbols": [

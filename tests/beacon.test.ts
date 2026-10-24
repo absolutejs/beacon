@@ -7374,6 +7374,36 @@ describe("ambient watchdog signals", () => {
     spinner.remove();
   });
 
+  test("loading grouping ignores wait measurements but retains the affected control", async () => {
+    const capture = async (name: string, deadline: number) => {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 1 },
+      });
+      const spinner = document.createElement("span");
+      spinner.className = name;
+      spinner.setAttribute(BEACON_ATTRIBUTE.LOADING, "save");
+      spinner.setAttribute(BEACON_ATTRIBUTE.LOADING_TIMEOUT, String(deadline));
+      setRect(spinner, rectOf(0, 40, 0, 40));
+      document.body.append(spinner);
+      try {
+        await settle(beacon);
+        await new Promise((resolve) => setTimeout(resolve, deadline + 10));
+        await settle(beacon);
+        return signalsSent(sent, "stuck_loading")[0];
+      } finally {
+        spinner.remove();
+        await beacon.close();
+      }
+    };
+    const first = await capture("save-spinner", 1);
+    const later = await capture("save-spinner", 40);
+    const other = await capture("other-spinner", 1);
+    expect(first?.tags?.deadlineMs).toBe("1");
+    expect(later?.tags?.deadlineMs).toBe("40");
+    expect(later?.groupingKey).toBe(first?.groupingKey);
+    expect(other?.groupingKey).not.toBe(first?.groupingKey);
+  });
+
   test("honors an element-specific stuck-loading deadline", async () => {
     const { beacon, sent } = makeWatchdogBeacon({
       signals: { layoutOverflowSettleMs: 0, stuckLoadingMs: 1 },

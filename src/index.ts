@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.16";
+export const BEACON_SDK_VERSION = "0.7.0-beta.17";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1193,6 +1193,11 @@ const VOLATILE_SIGNAL_TAGS = new Set([
   "durationMs",
   "documentReadyState",
   "elapsedMs",
+  "visibleMs",
+  "deadlineMs",
+  "layoutViewportHeight",
+  "visualViewportHeight",
+  "visualViewportOffsetTop",
   "errorCount",
   "focusEventTrusted",
   "inputDelayMs",
