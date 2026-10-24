@@ -346,3 +346,55 @@ the bundler merge the whole SDK back into it, defeating lazy startup.
 
 BSL-1.1 with a named carveout against hosted error-tracking / session-replay
 SaaS (Sentry, Datadog, LogRocket). See `LICENSE`.
+
+## Durable outbox
+
+`@absolutejs/beacon/outbox` exports `createOutbox`, `createIndexedDBOutboxStore`,
+`createMemoryOutboxStore`, and the `OutboxStore`/`OutboxRecord` types. It is a
+separate browser entry point: existing beacon collectors keep their current API.
+The host supplies already-redacted payloads and owns scheduling and server storage.
+
+```ts
+import {
+  createOutbox,
+  createIndexedDBOutboxStore,
+} from "@absolutejs/beacon/outbox";
+const outbox = createOutbox({
+  store: createIndexedDBOutboxStore("my-app-telemetry"),
+  send: async (record, signal) => {
+    const response = await fetch("/diagnostics/batches", {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: record.body,
+    });
+    if (!response.ok) throw Error("Delivery failed");
+    return (await response.json()).ack;
+  },
+});
+const id = crypto.randomUUID();
+await outbox.enqueue({ id, events: [] }, id);
+await outbox.flush();
+// Also flush on a host-owned interval, online, and next startup.
+```
+
+A successful `enqueue` means the store accepted the record; it does not mean the
+server received it. The server must deduplicate IDs and return the same ID only
+after committing storage. `flush()` leaves records in place on timeout, failed
+transport or a mismatched acknowledgement; it coalesces concurrent calls and
+honors exponential retry backoff. It does not start timers/listeners itself.
+
+Defaults: 128 records, 4 MB total, 1 MB each, two-day expiry, five-second attempt
+timeout. Oldest records are pruned under pressure. `stats()` reports pending
+records/bytes, drop/expiry/error/acknowledgement counts, cumulative persistence
+latency and retry time. Counters are per instance. Multiple tabs can resend a
+record and their bounds are not an atomic global quota. Browser eviction and
+storage failure remain possible; persistence errors are surfaced to the host.
+Memory storage is explicit and does not survive reloads. IndexedDB accepts
+bounded JSON batches, not blobs or a full gameplay replay. The custom store and
+transport interfaces allow later adapters without changing game code.
+
+Validation: `bun test tests/outbox.test.ts` covers restart recovery, unchanged
+retry IDs, acknowledgement mismatch, overlapping flushes, capacity/age limits,
+timeouts and quota failure. Exercised by Hello World's real browser offline /
+reload / retry workflow.
