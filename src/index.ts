@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.17";
+export const BEACON_SDK_VERSION = "0.7.0-beta.18";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -5920,7 +5920,12 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         // input may still be feeding a composited scroll that main-thread
         // scrollTop has not exposed yet.
         clearJailSettle();
-        if (event.ctrlKey || event.defaultPrevented || event.deltaY === 0) {
+        if (
+          event.ctrlKey ||
+          event.defaultPrevented ||
+          event.deltaY === 0 ||
+          Math.abs(event.deltaX) > Math.abs(event.deltaY)
+        ) {
           jailBurst = [];
 
           return;
@@ -6011,6 +6016,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                 scroller: descriptor,
                 direction: scrollingDown ? "down" : "up",
                 wheelCount: confirmedBurst.length,
+                deltaX: event.deltaX,
+                deltaY: event.deltaY,
+                deltaMode: event.deltaMode,
                 burstDurationMs: now - (confirmedBurst[0]?.at ?? now),
                 scrollTop: scroller.scrollTop,
                 scrollHeight: scroller.scrollHeight,

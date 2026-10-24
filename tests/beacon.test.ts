@@ -3279,6 +3279,41 @@ describe("ambient watchdog signals", () => {
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
   });
 
+  test("ignores horizontal gestures with vertical drift but still detects a vertical scroll jail", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    Object.defineProperty(scrolling, "scrollHeight", {
+      configurable: true,
+      value: 3000,
+    });
+    Object.defineProperty(scrolling, "clientHeight", {
+      configurable: true,
+      value: VIEWPORT_H,
+    });
+    Object.defineProperty(scrolling, "scrollTop", {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    const burst = (deltaX: number, deltaY: number) => {
+      for (let index = 0; index < 8; index += 1) {
+        const wheel = new Event("wheel", { bubbles: true });
+        Object.defineProperty(wheel, "deltaX", { value: deltaX });
+        Object.defineProperty(wheel, "deltaY", { value: deltaY });
+        Object.defineProperty(wheel, "ctrlKey", { value: false });
+        document.body.dispatchEvent(wheel);
+      }
+    };
+    burst(100, 1);
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
+    burst(1, 100);
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
+  });
+
   test("ignores wheels cancelled after the passive detector and still reports uncancelled input", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const scrolling = document.scrollingElement ?? document.documentElement;
