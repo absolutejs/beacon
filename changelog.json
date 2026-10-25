@@ -6,6 +6,20 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Keep media playback issues grouped across playback timestamps and buffering states while retaining those measurements as evidence.",
+					"symbols": [
+						"createBeacon",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-10-25",
+			"version": "0.7.0-beta.19"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Ignore predominantly horizontal wheel gestures when detecting blocked vertical scrolling, while retaining vertical failures and wheel-axis diagnostics.",
 					"symbols": [
 						"createBeacon",

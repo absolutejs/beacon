@@ -5189,6 +5189,52 @@ describe("ambient watchdog signals", () => {
     media.remove();
   });
 
+  test("media stall grouping retains measurements without splitting by playback position", async () => {
+    const media = document.createElement("video");
+    media.setAttribute(BEACON_ATTRIBUTE.MEDIA, "support-video");
+    Object.defineProperty(media, "paused", {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(media, "ended", { configurable: true, value: false });
+    document.body.append(media);
+    const { beacon, sent } = makeWatchdogBeacon({
+      signals: { mediaStallMs: 10 },
+    });
+    media.dispatchEvent(new Event("playing"));
+    Object.defineProperty(media, "currentTime", {
+      configurable: true,
+      value: 11,
+    });
+    media.dispatchEvent(new Event("waiting"));
+    await Bun.sleep(30);
+    await beacon.flush();
+    await beacon.close();
+    const second = makeWatchdogBeacon({ signals: { mediaStallMs: 10 } });
+    media.dispatchEvent(new Event("playing"));
+    Object.defineProperty(media, "currentTime", {
+      configurable: true,
+      value: 48,
+    });
+    Object.defineProperty(media, "readyState", {
+      configurable: true,
+      value: 2,
+    });
+    media.dispatchEvent(new Event("waiting"));
+    await Bun.sleep(30);
+    await beacon.flush();
+    await second.beacon.flush();
+    const events = [
+      ...signalsSent(sent, "media_playback_stalled"),
+      ...signalsSent(second.sent, "media_playback_stalled"),
+    ];
+    expect(events).toHaveLength(2);
+    expect(events[0]?.groupingKey).toBe(events[1]?.groupingKey);
+    expect(events[0]?.tags?.currentTime).toBe("11");
+    expect(events[1]?.tags?.currentTime).toBe("48");
+    media.remove();
+  });
+
   test("observeCapability reports handled browser API failures and rethrows", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const failure = new DOMException("permission denied", "NotAllowedError");
