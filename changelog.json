@@ -6,6 +6,22 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Ship the public outbox export and compiled browser entry",
+					"symbols": [
+						"createOutbox",
+						"createMemoryOutboxStore",
+						"createIndexedDBOutboxStore",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-10-26",
+			"version": "0.7.0-beta.20"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Keep media playback issues grouped across playback timestamps and buffering states while retaining those measurements as evidence.",
 					"symbols": [
 						"createBeacon",
