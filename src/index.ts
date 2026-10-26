@@ -1261,6 +1261,9 @@ const BUILT_ASSET_HASH =
 const normalizeSignalIdentityPart = (value: string): string =>
   value
     .replace(BUILT_ASSET_HASH, "$1.:asset$2")
+    // Vue useId counters change when earlier components mount/unmount.
+    // Keep the original selector in event tags, not in issue identity.
+    .replace(/#v-\d+(?:-\d+)*(?![\w-])/gu, "#:vue-id")
     .replace(UUID_PATH_SEGMENT, ":id")
     .replace(LONG_IDENTIFIER_SEGMENT, ":id")
     .slice(0, SIGNAL_IDENTITY_PART_MAX);
@@ -5138,6 +5141,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       }
       const observerStartedAt = performance.now();
       const observer = new PerformanceObserver((list) => {
+        // Geometry can force layout. Read it only after filtering, and share
+        // one snapshot across reports from this observer delivery.
+        let viewport: EarlyLayoutShiftViewport | undefined;
         for (const raw of list.getEntries()) {
           const entry = raw as PerformanceEntry & {
             hadRecentInput?: boolean;
@@ -5148,7 +5154,6 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             }>;
             value?: number;
           };
-          const viewport = currentViewport();
           processLayoutShift({
             buffered: entry.startTime < observerStartedAt,
             documentReadyState: document.readyState,
@@ -5168,7 +5173,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             })),
             startTime: entry.startTime,
             value: entry.value ?? 0,
-            viewport,
+            get viewport() {
+              return (viewport ??= currentViewport());
+            },
           });
         }
       });

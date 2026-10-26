@@ -4210,6 +4210,118 @@ describe("ambient watchdog signals", () => {
     }
   });
 
+  test("groups generated Vue control IDs without merging named controls", async () => {
+    const original = globalThis.PerformanceObserver;
+    class FakePerformanceObserver {
+      private readonly callback: PerformanceObserverCallback;
+      constructor(callback: PerformanceObserverCallback) {
+        this.callback = callback;
+      }
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type === "long-animation-frame") {
+          this.callback(
+            {
+              getEntries: () => [
+                {
+                  blockingDuration: 240,
+                  duration: 400,
+                  entryType: "long-animation-frame",
+                  scripts: [
+                    {
+                      duration: 220,
+                      functionName: "saveDeal",
+                      invoker: "BUTTON.onclick",
+                      sourceURL:
+                        "https://app.example/assets/deal.js?token=secret",
+                    },
+                  ],
+                  startTime: 90,
+                } as unknown as PerformanceEntry,
+              ],
+            } as PerformanceObserverEntryList,
+            this as unknown as PerformanceObserver,
+          );
+          return;
+        }
+        if (options.type !== "event") return;
+        const controls = ["v-20", "v-23", "company-notes"].map((id) => {
+          const control = document.createElement("textarea");
+          control.id = id;
+          return control;
+        });
+        this.callback(
+          {
+            getEntries: () =>
+              [
+                {
+                  duration: 1240,
+                  interactionId: 41,
+                  processingEnd: 300,
+                  processingStart: 180,
+                  startTime: 100,
+                },
+                {
+                  duration: 1310,
+                  interactionId: 42,
+                  processingEnd: 340,
+                  processingStart: 210,
+                  startTime: 110,
+                },
+                {
+                  duration: 1310,
+                  interactionId: 43,
+                  processingEnd: 340,
+                  processingStart: 210,
+                  startTime: 110,
+                },
+              ].map((entry, index) => ({
+                ...entry,
+                entryType: "event",
+                name: "click",
+                target: controls[index],
+              })) as unknown as PerformanceEntry[],
+          } as PerformanceObserverEntryList,
+          this as unknown as PerformanceObserver,
+        );
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon({
+        signals: { slowInteractionMs: 1000 },
+      });
+      await beacon.flush();
+      const events = signalsSent(sent, "slow_interaction");
+      expect(events).toHaveLength(3);
+      expect(events[0]?.message).toContain("click took 1240ms");
+      expect(events[0]?.tags).toMatchObject({
+        blockingDurationMs: "240",
+        blockingEntryType: "long-animation-frame",
+        blockingFrameDurationMs: "400",
+        durationMs: "1240",
+        eventType: "click",
+        inputDelayMs: "80",
+        interactionId: "41",
+        presentationDelayMs: "1040",
+        processingDurationMs: "120",
+        scriptFunction: "saveDeal",
+        scriptInvoker: "BUTTON.onclick",
+        scriptSource: "/assets/deal.js",
+        target: "textarea#v-20",
+      });
+      expect(events[1]?.groupingKey).toBe(events[0]?.groupingKey);
+      expect(events[1]?.tags?.target).toBe("textarea#v-23");
+      expect(events[2]?.groupingKey).not.toBe(events[0]?.groupingKey);
+    } finally {
+      globalThis.PerformanceObserver = original;
+    }
+  });
+
   test("ignores Event Timing entries without a real interaction id", async () => {
     const original = globalThis.PerformanceObserver;
     class FakePerformanceObserver {
@@ -4511,6 +4623,74 @@ describe("ambient watchdog signals", () => {
       expect(events[0]?.tags?.target).toBe("div.late-banner");
     } finally {
       globalThis.PerformanceObserver = original;
+    }
+  });
+
+  test("layout diagnostics read geometry only for reportable batches", async () => {
+    const original = globalThis.PerformanceObserver;
+    const root = document.documentElement;
+    const descriptor = Object.getOwnPropertyDescriptor(root, "scrollHeight");
+    let reads = 0;
+    const batchReads: number[] = [];
+    Object.defineProperty(root, "scrollHeight", {
+      configurable: true,
+      get: () => {
+        reads += 1;
+        return 1200;
+      },
+    });
+    class FakePerformanceObserver {
+      constructor(private readonly callback: PerformanceObserverCallback) {}
+      disconnect(): void {}
+      observe(options: PerformanceObserverInit): void {
+        if (options.type !== "layout-shift") return;
+        const emit = (entries: unknown[]) => {
+          const before = reads;
+          this.callback(
+            { getEntries: () => entries } as PerformanceObserverEntryList,
+            this as unknown as PerformanceObserver,
+          );
+          batchReads.push(reads - before);
+        };
+        const entry = (
+          className: string,
+          value: number,
+          hadRecentInput = false,
+        ) => {
+          const node = document.createElement("div");
+          node.className = className;
+          return {
+            entryType: "layout-shift",
+            duration: 0,
+            startTime: performance.now(),
+            sources: [{ node }],
+            value,
+            hadRecentInput,
+          };
+        };
+        emit([entry("tiny", 0.001), entry("clicked", 0.3, true)]);
+        emit([entry("first-banner", 0.3), entry("second-banner", 0.3)]);
+        emit([entry("first-banner", 0.3)]);
+      }
+      takeRecords(): PerformanceEntryList {
+        return [];
+      }
+    }
+    globalThis.PerformanceObserver =
+      FakePerformanceObserver as unknown as typeof PerformanceObserver;
+    try {
+      const { beacon, sent } = makeWatchdogBeacon();
+      await beacon.flush();
+      expect(batchReads).toEqual([0, 1, 0]);
+      const events = signalsSent(sent, "disruptive_layout_shift");
+      expect(events).toHaveLength(2);
+      expect(
+        events.every((event) => event.tags?.viewportDocumentHeight === "1200"),
+      ).toBeTrue();
+    } finally {
+      globalThis.PerformanceObserver = original;
+      if (descriptor) Object.defineProperty(root, "scrollHeight", descriptor);
+      else Reflect.deleteProperty(root, "scrollHeight");
     }
   });
 
