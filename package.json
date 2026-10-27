@@ -1,6 +1,6 @@
 {
   "name": "@absolutejs/beacon",
-  "version": "0.7.0-beta.19",
+  "version": "0.7.0-beta.20",
   "description": "Tiny, zero-dependency browser SDK for the AbsoluteJS observability stack. Captures uncaught errors + unhandled rejections, breadcrumbs (console/click/fetch/history), batches, and POSTs an envelope to @absolutejs/errors/ingest via sendBeacon/keepalive. ~2-5KB gz, no Effect in the browser; end-to-end type-safe via the shared erased envelope contract.",
   "repository": {
     "type": "git",
@@ -42,7 +42,12 @@
       "import": "./dist/manifest.js",
       "default": "./dist/manifest.js"
     },
-    "./manifest.json": "./dist/manifest.json"
+    "./manifest.json": "./dist/manifest.json",
+    "./outbox": {
+      "types": "./dist/outbox.d.ts",
+      "import": "./dist/outbox.js",
+      "default": "./dist/outbox.js"
+    }
   },
   "publishConfig": {
     "access": "public"
@@ -54,14 +59,15 @@
     "dist"
   ],
   "scripts": {
-    "build": "rm -rf dist && bun build src/index.ts src/contracts.ts src/early.ts src/policy.ts src/manifest.ts --outdir dist --root ./src --sourcemap --target=browser --external @absolutejs/manifest --external '@absolutejs/manifest/*' --external @sinclair/typebox --external '@sinclair/typebox/*' --external web-vitals --external 'web-vitals/*' && tsc --project tsconfig.build.json && absolute-manifest emit",
+    "build": "rm -rf dist && bun build src/index.ts src/contracts.ts src/early.ts src/policy.ts src/outbox.ts src/manifest.ts --outdir dist --root ./src --sourcemap --target=browser --external @absolutejs/manifest --external '@absolutejs/manifest/*' --external @sinclair/typebox --external '@sinclair/typebox/*' --external web-vitals --external 'web-vitals/*' && tsc --project tsconfig.build.json && absolute-manifest emit",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"./**/*.{ts,json,md}\"",
     "verify-package": "absolute-manifest verify-package",
-    "check:package": "bun run format && bun run typecheck && bun run test && bun run verify-package && bun run build && absolute-changelog check",
+    "check:package": "bun run format && bun run typecheck && bun run test && bun run verify-package && bun run build && bun run test:package && absolute-changelog check",
     "release": "bun run check:package && npm publish --access public",
-    "prepublishOnly": "bun run check:package"
+    "prepublishOnly": "bun run check:package",
+    "test:package": "bun scripts/verify-outbox-package.ts"
   },
   "keywords": [
     "absolutejs",
