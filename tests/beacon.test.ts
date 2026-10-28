@@ -3317,6 +3317,41 @@ describe("ambient watchdog signals", () => {
     expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
   });
 
+  test("ignores sub-pixel inertia tails but still reports meaningful blocked wheel input", async () => {
+    const { beacon, sent } = makeWatchdogBeacon();
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    Object.defineProperty(scrolling, "scrollHeight", {
+      configurable: true,
+      value: 3000,
+    });
+    Object.defineProperty(scrolling, "clientHeight", {
+      configurable: true,
+      value: VIEWPORT_H,
+    });
+    Object.defineProperty(scrolling, "scrollTop", {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    for (let index = 0; index < 17; index += 1) {
+      const wheel = new Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "deltaY", { value: 0.3008880615234375 });
+      Object.defineProperty(wheel, "ctrlKey", { value: false });
+      document.body.dispatchEvent(wheel);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(0);
+    for (let index = 0; index < 8; index += 1) {
+      const wheel = new Event("wheel", { bubbles: true });
+      Object.defineProperty(wheel, "deltaY", { value: 100 });
+      document.body.dispatchEvent(wheel);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 550));
+    await beacon.flush();
+    expect(signalsSent(sent, "scroll_jail")).toHaveLength(1);
+  });
+
   test("ignores horizontal gestures with vertical drift but still detects a vertical scroll jail", async () => {
     const { beacon, sent } = makeWatchdogBeacon();
     const scrolling = document.scrollingElement ?? document.documentElement;

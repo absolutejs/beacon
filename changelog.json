@@ -6,6 +6,19 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Require meaningful accumulated pixel scroll intent before reporting scroll jail, avoiding fractional trackpad inertia false positives while retaining blocked-scroll detection.",
+					"symbols": [
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-10-28",
+			"version": "0.7.0-beta.23"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Reuse geometry and computed styles within each layout scan, reducing repeated DOM reads while preserving fresh measurements on subsequent scans.",
 					"symbols": [
 						"createBeacon",

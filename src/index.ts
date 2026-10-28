@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.22";
+export const BEACON_SDK_VERSION = "0.7.0-beta.23";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1680,6 +1680,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   const FONT_FAILURE_CONFIRM_DEFAULT_MS = 5000;
   const KEYBOARD_VIEWPORT_HEIGHT_RATIO_MAX = 0.8;
   const SCROLL_JAIL_EVENT_COUNT = 8;
+  const SCROLL_JAIL_MIN_PIXEL_INTENT = 16;
   const SCROLL_JAIL_WINDOW_MS = 2000;
   // Passive wheel listeners can run before a composited scroll is reflected
   // in main-thread scrollTop. Mobile Safari has taken roughly 250ms in live
@@ -6016,6 +6017,23 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           );
           jailBurst = [];
           if (confirmedBurst.length < SCROLL_JAIL_EVENT_COUNT) return;
+          // Trackpad inertia can emit many sub-pixel tail events without a
+          // browser-visible scroll step. Event count alone is not scroll intent.
+          // Line/page deltas already represent meaningful movement; apply the
+          // pixel threshold only when every event uses pixel units.
+          const pixelBurst = confirmedBurst.every(
+            ({ event }) =>
+              event.deltaMode === undefined || event.deltaMode === 0,
+          );
+          const requestedPixels = confirmedBurst.reduce(
+            (sum, { event }) => sum + event.deltaY,
+            0,
+          );
+          if (
+            pixelBurst &&
+            Math.abs(requestedPixels) < SCROLL_JAIL_MIN_PIXEL_INTENT
+          )
+            return;
           if (scrollActivityGeneration !== jailStartingScrollGeneration) return;
           if (!scroller.isConnected || scroller.scrollTop !== startingPosition)
             return;
@@ -6046,6 +6064,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
                 scroller: descriptor,
                 direction: scrollingDown ? "down" : "up",
                 wheelCount: confirmedBurst.length,
+                requestedPixels: pixelBurst ? requestedPixels : undefined,
                 deltaX: event.deltaX,
                 deltaY: event.deltaY,
                 deltaMode: event.deltaMode,
