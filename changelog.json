@@ -6,6 +6,20 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Reuse geometry and computed styles within each layout scan, reducing repeated DOM reads while preserving fresh measurements on subsequent scans.",
+					"symbols": [
+						"createBeacon",
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-10-27",
+			"version": "0.7.0-beta.22"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Group generated Vue control identities consistently and avoid unnecessary layout reads in layout-shift diagnostics.",
 					"symbols": [
 						"createBeacon",

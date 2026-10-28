@@ -2668,6 +2668,44 @@ describe("layout-overflow signals", () => {
     await beacon.flush();
   };
 
+  test("shares scan reads but remeasures geometry and visibility on the next scan", async () => {
+    const parent = document.createElement("section");
+    const visible = document.createElement("button");
+    const hidden = document.createElement("button");
+    visible.className = "changed-visible";
+    hidden.className = "changed-hidden";
+    parent.append(visible, hidden);
+    document.body.append(parent);
+    mockRect(parent, domRect(0, VIEWPORT_WIDTH));
+    mockRect(visible, domRect(0, 100));
+    mockRect(hidden, domRect(200, 300));
+    const original = window.getComputedStyle;
+    let reads = 0;
+    window.getComputedStyle = (element, pseudo) => {
+      if (element === parent) reads += 1;
+      return original.call(window, element, pseudo);
+    };
+    try {
+      const { beacon, sent } = makeOverflowBeacon();
+      await scan(beacon);
+      expect(reads).toBe(1);
+      reads = 0;
+      mockRect(visible, domRect(0, 1300));
+      mockRect(hidden, domRect(0, 1300));
+      hidden.style.display = "none";
+      await scan(beacon);
+      expect(reads).toBe(1);
+      const overflows = sent
+        .flatMap((envelope) => envelope.events)
+        .filter((event) => event.tags?.signal === "layout_overflow");
+      expect(overflows).toHaveLength(1);
+      expect(overflows[0]?.message).toContain("changed-visible");
+    } finally {
+      window.getComputedStyle = original;
+      parent.remove();
+    }
+  });
+
   test("reports an in-flow element spilling past the viewport, once", async () => {
     const { beacon, sent } = makeOverflowBeacon();
     const wide = document.createElement("div");

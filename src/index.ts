@@ -35,7 +35,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.21";
+export const BEACON_SDK_VERSION = "0.7.0-beta.22";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -3721,6 +3721,27 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     typeof document !== "undefined" &&
     typeof window.getComputedStyle === "function"
   ) {
+    // Share reads only inside one synchronous scan. Never retain geometry
+    // across a resize, route change, theme change, or loading-indicator poll.
+    let scanReads: {
+      styles: WeakMap<Element, CSSStyleDeclaration>;
+      rects: WeakMap<Element, DOMRect>;
+    } | null = null;
+    const scanStyle = (element: Element): CSSStyleDeclaration => {
+      const cached = scanReads?.styles.get(element);
+      if (cached) return cached;
+      const style = window.getComputedStyle(element);
+      scanReads?.styles.set(element, style);
+      return style;
+    };
+    const scanRect = (element: Element): DOMRect => {
+      const cached = scanReads?.rects.get(element);
+      if (cached) return cached;
+      const rect = element.getBoundingClientRect();
+      scanReads?.rects.set(element, rect);
+      return rect;
+    };
+
     const detectOverflow = signals.layoutOverflows !== false;
     const detectOcclusion = signals.occludedControls !== false;
     const detectControlCollision = signals.controlCollisions !== false;
@@ -3779,7 +3800,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         ) {
           return true;
         }
-        const style = window.getComputedStyle(current);
+        const style = scanStyle(current);
         if (
           style.display === "none" ||
           style.visibility === "hidden" ||
@@ -3843,7 +3864,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       if (seenOverflows.has(key)) return;
       seenOverflows.add(key);
       overflowReports += 1;
-      const rect = element.getBoundingClientRect();
+      const rect = scanRect(element);
       const resourceUrl = RESOURCE_ERROR_TAGS.has(element.tagName.toLowerCase())
         ? resourceUrlOf(element)
         : undefined;
@@ -3862,7 +3883,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           targetBottomPx: String(Math.round(rect.bottom)),
           targetHeightPx: String(Math.round(rect.height)),
           targetLeftPx: String(Math.round(rect.left)),
-          targetPosition: window.getComputedStyle(element).position,
+          targetPosition: scanStyle(element).position,
           targetRightPx: String(Math.round(rect.right)),
           targetTopPx: String(Math.round(rect.top)),
           targetWidthPx: String(Math.round(rect.width)),
@@ -3890,9 +3911,9 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         ) {
           return;
         }
-        const style = window.getComputedStyle(element);
+        const style = scanStyle(element);
         if (hasHiddenAncestor(element)) return;
-        const rect = element.getBoundingClientRect();
+        const rect = scanRect(element);
         if (rect.width === 0 && rect.height === 0) return;
         if (
           rect.width <= 2 &&
@@ -4026,11 +4047,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         ancestor;
         ancestor = ancestor.parentElement
       ) {
-        const style = window.getComputedStyle(ancestor);
+        const style = scanStyle(ancestor);
         const clipX = clipsAxis(style.overflowX);
         const clipY = clipsAxis(style.overflowY);
         if (!clipX && !clipY) continue;
-        const ancestorRect = ancestor.getBoundingClientRect();
+        const ancestorRect = scanRect(ancestor);
         if (clipX) {
           visible.left = Math.max(visible.left, ancestorRect.left);
           visible.right = Math.min(visible.right, ancestorRect.right);
@@ -4105,13 +4126,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       other: Element,
     ): Record<string, unknown> => {
       const geometry = (element: Element) => {
-        const rect = element.getBoundingClientRect();
+        const rect = scanRect(element);
         let positionedAncestor: Element | null = element;
         while (
           positionedAncestor !== null &&
-          !["fixed", "sticky"].includes(
-            window.getComputedStyle(positionedAncestor).position,
-          )
+          !["fixed", "sticky"].includes(scanStyle(positionedAncestor).position)
         ) {
           positionedAncestor = positionedAncestor.parentElement;
         }
@@ -4124,12 +4143,11 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
             width: rect.width,
             height: rect.height,
           },
-          position: window.getComputedStyle(element).position,
+          position: scanStyle(element).position,
           ...(positionedAncestor
             ? {
                 positionedAncestor: describeElement(positionedAncestor),
-                ancestorPosition:
-                  window.getComputedStyle(positionedAncestor).position,
+                ancestorPosition: scanStyle(positionedAncestor).position,
               }
             : {}),
         };
@@ -4157,7 +4175,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       )) {
         if (controls.length >= CONTROL_COLLISION_SAMPLE_LIMIT) break;
         if (isScanExempt(element) || hasHiddenAncestor(element, true)) continue;
-        const rect = element.getBoundingClientRect();
+        const rect = scanRect(element);
         if (rect.width === 0 || rect.height === 0) continue;
         const visible = visibleControlRect(
           element,
@@ -4166,7 +4184,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           viewportHeight,
         );
         if (visible === null) continue;
-        const position = window.getComputedStyle(element).position;
+        const position = scanStyle(element).position;
         controls.push({
           element,
           positioned: position === "absolute" || position === "fixed",
@@ -4297,7 +4315,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       for (const control of Array.from(controls)) {
         if (sampled >= OCCLUSION_SAMPLE_LIMIT) return;
         if (isScanExempt(control) || hasHiddenAncestor(control, true)) continue;
-        const rect = control.getBoundingClientRect();
+        const rect = scanRect(control);
         if (rect.width === 0 || rect.height === 0) continue;
         const visibleRect = visibleControlRect(
           control,
@@ -4326,7 +4344,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         ) {
           continue;
         }
-        const topRect = top.getBoundingClientRect();
+        const topRect = scanRect(top);
         const overlapX =
           Math.min(visibleRect.right, topRect.right) -
           Math.max(visibleRect.left, topRect.left);
@@ -4504,7 +4522,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       } | null = null;
       let node: Element | null = element;
       while (node !== null) {
-        const style = window.getComputedStyle(node);
+        const style = scanStyle(node);
         if (style.backgroundImage !== "none" && style.backgroundImage !== "") {
           return null;
         }
@@ -4540,7 +4558,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         if (sampled >= INVISIBLE_TEXT_SAMPLE_LIMIT) return;
         if (isScanExempt(element)) continue;
         if ((element.textContent ?? "").trim() === "") continue;
-        const rect = element.getBoundingClientRect();
+        const rect = scanRect(element);
         if (rect.width === 0 || rect.height === 0) continue;
         if (
           rect.bottom < 0 ||
@@ -4550,7 +4568,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
         ) {
           continue;
         }
-        const style = window.getComputedStyle(element);
+        const style = scanStyle(element);
         // Transitions legitimately pass through opacity 0.
         if (Number(style.opacity || "1") < 0.1) continue;
         const foreground = parseColor(style.color);
@@ -4587,7 +4605,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     // intentional inverted hero is indistinguishable from a missed theme.
     const activeTheme = (): "dark" | "light" | null => {
       const root = document.documentElement;
-      const declared = window.getComputedStyle(root).colorScheme.trim();
+      const declared = scanStyle(root).colorScheme.trim();
       if (declared === "dark") return "dark";
       if (declared === "light") return "light";
       const dataTheme = root.getAttribute("data-theme");
@@ -4616,7 +4634,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           ) {
             continue;
           }
-          const rect = element.getBoundingClientRect();
+          const rect = scanRect(element);
           const minimumArea = element.matches(CONTROL_SELECTOR)
             ? themeMismatchControlMinArea
             : themeMismatchMinArea;
@@ -4635,7 +4653,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
               "button, input, select, textarea, [role=button]",
             ) !== null;
           if (!hasContent) continue;
-          const style = window.getComputedStyle(element);
+          const style = scanStyle(element);
           if (
             style.display === "none" ||
             style.visibility === "hidden" ||
@@ -4754,7 +4772,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           resetLoadingIndicator(indicator);
           continue;
         }
-        const rect = indicator.getBoundingClientRect();
+        const rect = scanRect(indicator);
         if (rect.width === 0 && rect.height === 0) {
           resetLoadingIndicator(indicator);
           continue;
@@ -4797,7 +4815,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const roots = document.querySelectorAll(`[${BEACON_ATTRIBUTE.APP_ROOT}]`);
       for (const root of Array.from(roots)) {
         if (isScanExempt(root)) continue;
-        const rect = root.getBoundingClientRect();
+        const rect = scanRect(root);
         if (rect.width === 0 || rect.height === 0) continue;
         const text = (root.textContent ?? "").trim();
         const meaningful =
@@ -4857,28 +4875,30 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       return utilityExpectations.every(([selector, property, expected]) => {
         const sample = document.querySelector(selector);
 
-        return (
-          sample === null ||
-          window.getComputedStyle(sample)[property] === expected
-        );
+        return sample === null || scanStyle(sample)[property] === expected;
       });
     };
 
     const runSettledScan = (): void => {
-      // Geometry and computed colors are meaningless while an active
-      // stylesheet failed to attach. Resource instrumentation owns that
-      // failure; emitting dozens of collisions from the unstyled fallback DOM
-      // would hide the single actionable cause.
-      const geometryReady =
-        documentStylesAreReady() &&
-        !mobileKeyboardViewportActive() &&
-        !visualViewportHorizontallyShifted();
-      if (detectOverflow && geometryReady) scanForOverflow();
-      if (detectControlCollision && geometryReady) scanForControlCollisions();
-      if (detectOcclusion && geometryReady) scanForOcclusion();
-      if (detectInvisibleText && geometryReady) scanForInvisibleText();
-      if (detectThemeMismatch && geometryReady) scanForThemeMismatch();
-      if (detectStuckLoading) checkStuckLoading();
+      scanReads = { styles: new WeakMap(), rects: new WeakMap() };
+      try {
+        // Geometry and computed colors are meaningless while an active
+        // stylesheet failed to attach. Resource instrumentation owns that
+        // failure; emitting dozens of collisions from the unstyled fallback DOM
+        // would hide the single actionable cause.
+        const geometryReady =
+          documentStylesAreReady() &&
+          !mobileKeyboardViewportActive() &&
+          !visualViewportHorizontallyShifted();
+        if (detectOverflow && geometryReady) scanForOverflow();
+        if (detectControlCollision && geometryReady) scanForControlCollisions();
+        if (detectOcclusion && geometryReady) scanForOcclusion();
+        if (detectInvisibleText && geometryReady) scanForInvisibleText();
+        if (detectThemeMismatch && geometryReady) scanForThemeMismatch();
+        if (detectStuckLoading) checkStuckLoading();
+      } finally {
+        scanReads = null;
+      }
     };
 
     const scheduleOverflowScan = (): void => {
