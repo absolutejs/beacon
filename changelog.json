@@ -6,6 +6,19 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Preserve safe browser rejection diagnostics instead of empty JSON, handle throwing getters and proxies, and avoid serializing arbitrary rejection payloads or fabricating stacks.",
+					"symbols": [
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-11-17",
+			"version": "0.7.0-beta.24"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Require meaningful accumulated pixel scroll intent before reporting scroll jail, avoiding fractional trackpad inertia false positives while retaining blocked-scroll detection.",
 					"symbols": [
 						"BEACON_SDK_VERSION"

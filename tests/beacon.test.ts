@@ -1170,6 +1170,35 @@ describe("auto-instrumentation", () => {
     expect(sent[0]?.events[0]).not.toHaveProperty("stack");
   });
 
+  test("reports opaque browser objects with bounded diagnostics instead of JSON payloads", async () => {
+    const { beacon, sent } = make({
+      instrument: { ...ALL_OFF, unhandledRejections: true },
+    });
+    track(beacon);
+    dispatchUnhandledRejection(
+      Object.create(null, {
+        name: { value: "SecurityError" },
+        message: { value: "Browser storage unavailable" },
+        code: { value: 18 },
+        password: { value: "do-not-send" },
+      }),
+    );
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    dispatchUnhandledRejection(revoked.proxy);
+    await beacon.flush();
+    expect(sent[0]?.events[0]).toMatchObject({
+      name: "SecurityError",
+      message: "Browser storage unavailable",
+      extra: { code: 18, rejectionType: "object" },
+    });
+    expect(sent[0]?.events[0]).not.toHaveProperty("stack");
+    expect(sent[0]?.events[1]?.message).toBe(
+      "Unhandled promise rejection (object)",
+    );
+    expect(JSON.stringify(sent)).not.toContain("do-not-send");
+  });
+
   test("preserves an error-shaped rejection's original stack", async () => {
     const sent: BeaconEnvelope[] = [];
     const beacon = track(

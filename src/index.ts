@@ -1,3 +1,4 @@
+import { describeRejection } from "./rejection";
 /**
  * @absolutejs/beacon — tiny, zero-dependency browser SDK for the AbsoluteJS
  * observability stack.
@@ -35,7 +36,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.23";
+export const BEACON_SDK_VERSION = "0.7.0-beta.24";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -3364,32 +3365,20 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
   if (instrument.unhandledRejections !== false) {
     const onRejection = (event: PromiseRejectionEvent): void => {
       const reason = event.reason;
-      if (reason instanceof Error) {
+      // A cross-origin or revoked proxy can throw even during instanceof.
+      let nativeError = false;
+      try {
+        nativeError = reason instanceof Error;
+      } catch {
+        /* Describe safely below. */
+      }
+      if (nativeError) {
         captureException(reason, { level: "error" });
         reportCapturedErrorClick(reason);
         return;
       }
-      if (
-        typeof reason === "object" &&
-        reason !== null &&
-        typeof (reason as { stack?: unknown }).stack === "string"
-      ) {
-        captureException(reason, { level: "error" });
-        return;
-      }
-      const message =
-        typeof reason === "string" ? reason : safeStringify(reason);
-      captureException(errorWithoutStack("UnhandledRejection", message), {
-        extra: {
-          rejectionType:
-            reason === null
-              ? "null"
-              : Array.isArray(reason)
-                ? "array"
-                : typeof reason,
-        },
-        level: "error",
-      });
+      const { error, extra } = describeRejection(reason);
+      captureException(error, { extra, level: "error" });
       reportErrorClick?.("UnhandledRejection");
     };
     window.addEventListener("unhandledrejection", onRejection);
