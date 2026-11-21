@@ -137,3 +137,54 @@ test("TBT finalizes its bounded window, drains pending records and stops observi
     globalThis.setTimeout = originalTimeout;
   }
 });
+
+test("errors and vitals retain independent bounded lifecycle snapshots", async () => {
+  let report: ((metric: WebVitalMetric) => void) | undefined;
+  const vitals: WebVital[] = [];
+  const events: import("../src/index").BeaconEvent[] = [];
+  const ignore = () => {};
+  const beacon = createBeacon({
+    project: "lifecycle",
+    instrument,
+    beforeSend: (event) => {
+      events.push(event);
+      return null;
+    },
+    vitals: {
+      transport: (v) => {
+        vitals.push(v);
+      },
+      webVitals: {
+        onCLS: ignore,
+        onFCP: (callback) => {
+          report = callback;
+        },
+        onINP: ignore,
+        onLCP: ignore,
+        onTTFB: ignore,
+      },
+    },
+  });
+  try {
+    beacon.captureMessage("retained error");
+    report?.({
+      id: "paint",
+      name: "FCP",
+      value: 893293,
+      rating: "poor",
+      navigationType: "navigate",
+      attribution: { timeToFirstByte: 736 },
+    });
+    expect(events[0]?.extra?.pageLifecycle).toMatchObject({
+      visibilityChanges: 0,
+      bfcacheRestores: 0,
+    });
+    expect(vitals[0]?.attribution).toMatchObject({
+      timeToFirstByte: 736,
+      pageLifecycle: { visibilityChanges: 0 },
+    });
+    expect(vitals[0]?.value).toBe(893293);
+  } finally {
+    await beacon.close();
+  }
+});

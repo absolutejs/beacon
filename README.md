@@ -398,3 +398,15 @@ Validation: `bun test tests/outbox.test.ts` covers restart recovery, unchanged
 retry IDs, acknowledgement mismatch, overlapping flushes, capacity/age limits,
 timeouts and quota failure. Exercised by Hello World's real browser offline /
 reload / retry workflow.
+
+### Page lifecycle diagnostics
+
+Errors include `extra.pageLifecycle`; vital samples include
+`attribution.pageLifecycle`. These content-free snapshots record initial/current
+visibility, readiness, observed hidden duration, visibility changes, back/forward
+cache restores, pagehide state, and at most eight recent transitions. Times are
+monotonic milliseconds since observation began. They do not reconstruct history
+before Beacon initialized or prove that a high paint value meant a blank page.
+No page content, user identifiers, extra request, or polling timer is added.
+Hosts using strict attribution schemas must allow the optional `pageLifecycle`
+object to retain this context. `close()` removes its listeners.

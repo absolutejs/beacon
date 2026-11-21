@@ -1,3 +1,4 @@
+import { observePageLifecycle } from "./pageLifecycle";
 import { describeRejection } from "./rejection";
 /**
  * @absolutejs/beacon — tiny, zero-dependency browser SDK for the AbsoluteJS
@@ -36,7 +37,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.24";
+export const BEACON_SDK_VERSION = "0.7.0-beta.25";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -1872,7 +1873,8 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     return false;
   };
 
-  const cleanups: Array<() => void> = [];
+  const lifecycle = observePageLifecycle();
+  const cleanups: Array<() => void> = [lifecycle.close];
   let closed = false;
 
   // Core Web Vitals (off unless `vitals` is set). `true` ⇒ all defaults.
@@ -1914,9 +1916,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
           : { sdkVersion: vitalsOptions.sdkVersion }),
         ...(traceId === undefined ? {} : { traceId }),
         value: metric.value,
-        ...(vitalAttribution(metric.attribution) === undefined
-          ? {}
-          : { attribution: vitalAttribution(metric.attribution) }),
+        attribution: {
+          ...vitalAttribution(metric.attribution),
+          pageLifecycle: lifecycle.snapshot(),
+        },
       };
       vitalsOptions.onVital?.(vital);
       if (vitalsOptions.transport !== undefined) {
@@ -2057,6 +2060,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     const extra: Record<string, unknown> = {
       ...event.extra,
       pageStartedAt,
+      pageLifecycle: lifecycle.snapshot(),
       sdkVersion: BEACON_SDK_VERSION,
       sessionId,
     };
@@ -2884,6 +2888,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       const observer = new ReportingObserver(
         (reports) => {
           for (const report of reports) {
+            if (typeof report.type !== "string" || report.type === "") continue;
             const body = report.body as unknown as {
               id?: unknown;
               sourceFile?: unknown;

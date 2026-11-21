@@ -6,6 +6,19 @@
 			"changes": [
 				{
 					"kind": "fixed",
+					"summary": "Retain bounded content-free page lifecycle and visibility context on errors and vitals, and guard missing browser policy report types.",
+					"symbols": [
+						"BEACON_SDK_VERSION"
+					]
+				}
+			],
+			"date": "2026-11-21",
+			"version": "0.7.0-beta.25"
+		},
+		{
+			"changes": [
+				{
+					"kind": "fixed",
 					"summary": "Preserve safe browser rejection diagnostics instead of empty JSON, handle throwing getters and proxies, and avoid serializing arbitrary rejection payloads or fabricating stacks.",
 					"symbols": [
 						"BEACON_SDK_VERSION"
