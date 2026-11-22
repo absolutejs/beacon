@@ -241,6 +241,23 @@ describe("capture + transport", () => {
     ]);
   });
 
+  test("background delivery failures stay out of the app, while explicit flushes report failure", async () => {
+    const failure = new Error("Browser error report was refused (503)");
+    const transport = async () => {
+      throw failure;
+    };
+    const automatic = track(make({ maxBatch: 1, transport }).beacon);
+    automatic.captureMessage("first event");
+    await tick();
+
+    const manual = track(make({ transport }).beacon);
+    manual.captureMessage("second event");
+    await expect(manual.flush()).rejects.toBe(failure);
+    manual.captureMessage("final event");
+    void manual.close();
+    await tick();
+  });
+
   test("auto-flushes when maxBatch is reached", async () => {
     const { beacon, sent } = make({ maxBatch: 2 });
     track(beacon);

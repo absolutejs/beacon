@@ -37,7 +37,7 @@ export type BeaconLevel = "fatal" | "error" | "warning" | "info";
 export const BEACON_TRACE_HEADER = "x-absolute-trace-id";
 
 /** Beacon package version retained with every captured event. */
-export const BEACON_SDK_VERSION = "0.7.0-beta.25";
+export const BEACON_SDK_VERSION = "0.7.0-beta.26";
 
 /** Arbitrary event tags, with Beacon's reserved `signal` tag type-checked. */
 export type BeaconTags = Record<string, string> & {
@@ -2004,7 +2004,7 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     };
   };
 
-  const flush = async (useBeacon = false): Promise<void> => {
+  const sendBuffered = async (useBeacon: boolean): Promise<void> => {
     flushPendingNetworkFailures();
     if (buffer.length === 0) return;
     const events = buffer.splice(0, buffer.length);
@@ -2023,6 +2023,15 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
       useBeacon,
       ...(options.key !== undefined ? { key: options.key } : {}),
     });
+  };
+
+  const flush = (useBeacon = false): Promise<void> => {
+    const delivery = sendBuffered(useBeacon);
+    // Timers, lifecycle listeners and effect cleanup fire and forget. Mark
+    // the rejection handled so telemetry cannot become a new app error.
+    // Explicit callers still receive the original delivery promise.
+    void delivery.catch(() => {});
+    return delivery;
   };
 
   const addBreadcrumb: Beacon["addBreadcrumb"] = (crumb) => {
@@ -7947,10 +7956,10 @@ export const createBeacon = (options: BeaconOptions): Beacon => {
     addBreadcrumb,
     captureException,
     captureMessage,
-    close: async () => {
+    close: () => {
       closed = true;
       for (const cleanup of cleanups.splice(0, cleanups.length)) cleanup();
-      await flush(true);
+      return flush(true);
     },
     flush: () => flush(false),
     observeCapability,
